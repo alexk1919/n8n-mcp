@@ -54,6 +54,10 @@ Collected data is used solely to:
 - Identify common error patterns
 - Improve tool performance and reliability
 - Guide development priorities
+- Train machine learning models for workflow generation
+
+All ML training uses sanitized, anonymized data only.
+Users can opt-out at any time with `npx n8n-mcp telemetry disable`
 
 ## Data Retention
 - Data is retained for analysis purposes
@@ -66,4 +70,4 @@ We may update this privacy policy from time to time. Updates will be reflected i
 For questions about telemetry or privacy, please open an issue on GitHub:
 https://github.com/czlonkowski/n8n-mcp/issues
 
-Last updated: 2025-09-25
+Last updated: 2025-11-06
