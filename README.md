@@ -5,7 +5,7 @@
 [![npm version](https://img.shields.io/npm/v/n8n-mcp.svg)](https://www.npmjs.com/package/n8n-mcp)
 [![codecov](https://codecov.io/gh/czlonkowski/n8n-mcp/graph/badge.svg?token=YOUR_TOKEN)](https://codecov.io/gh/czlonkowski/n8n-mcp)
 [![Tests](https://img.shields.io/badge/tests-3336%20passing-brightgreen.svg)](https://github.com/czlonkowski/n8n-mcp/actions)
-[![n8n version](https://img.shields.io/badge/n8n-1.119.1-orange.svg)](https://github.com/n8n-io/n8n)
+[![n8n version](https://img.shields.io/badge/n8n-1.120.3-orange.svg)](https://github.com/n8n-io/n8n)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Fczlonkowski%2Fn8n--mcp-green.svg)](https://github.com/czlonkowski/n8n-mcp/pkgs/container/n8n-mcp)
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/n8n-mcp?referralCode=n8n-mcp)
 
@@ -1113,6 +1113,13 @@ Current database coverage (n8n v1.117.2):
 - 💾 **Database size**: ~68MB (includes templates with metadata)
 
 ## 🔄 Recent Updates
+
+### v2.22.19 - Critical Bug Fix
+**Fixed:** Stack overflow in session removal (Issue #427)
+- Eliminated infinite recursion in HTTP server session cleanup
+- Transport resources now deleted before closing to prevent circular event handler chain
+- Production logs no longer show "RangeError: Maximum call stack size exceeded"
+- All session cleanup operations now complete successfully without crashes
 
 See [CHANGELOG.md](./docs/CHANGELOG.md) for full version history and recent changes.
 

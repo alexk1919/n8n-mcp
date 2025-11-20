@@ -7,6 +7,193 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.22.20] - 2025-11-19
+
+### 🔄 Dependencies
+
+**n8n Update to 1.120.3**
+
+Updated all n8n-related dependencies to their latest versions:
+
+- n8n: 1.119.1 → 1.120.3
+- n8n-core: 1.118.0 → 1.119.2
+- n8n-workflow: 1.116.0 → 1.117.0
+- @n8n/n8n-nodes-langchain: 1.118.0 → 1.119.1
+- Rebuilt node database with 544 nodes (439 from n8n-nodes-base, 105 from @n8n/n8n-nodes-langchain)
+
+Conceived by Romuald Członkowski - https://www.aiadvisors.pl/en
+
+## [2.22.18] - 2025-11-14
+
+### ✨ Features
+
+**Structural Hash Tracking for Workflow Mutations**
+
+Added structural hash tracking to enable cross-referencing between workflow mutations and workflow quality data:
+
+#### Structural Hash Generation
+- Added `workflowStructureHashBefore` and `workflowStructureHashAfter` fields to mutation records
+- Hashes based on node types + connections (structural elements only)
+- Compatible with `telemetry_workflows.workflow_hash` format for cross-referencing
+- Implementation: Uses `WorkflowSanitizer.generateWorkflowHash()` for consistency
+- Enables linking mutation impact to workflow quality scores and grades
+
+#### Success Tracking Enhancement
+- Added `isTrulySuccessful` computed field to mutation records
+- Definition: Mutation executed successfully AND improved/maintained validation AND has known intent
+- Enables filtering to high-quality mutation data
+- Provides automated success detection without manual review
+
+#### Testing & Verification
+- All 17 mutation-tracker unit tests passing
+- Verified with live mutations: structural changes detected (hash changes), config-only updates detected (hash stays same)
+- Success tracking working accurately (64% truly successful rate in testing)
+
+**Files Modified**:
+- `src/telemetry/mutation-tracker.ts`: Generate structural hashes during mutation processing
+- `src/telemetry/mutation-types.ts`: Add new fields to WorkflowMutationRecord interface
+- `src/telemetry/workflow-sanitizer.ts`: Expose generateWorkflowHash() method
+- `tests/unit/telemetry/mutation-tracker.test.ts`: Add 5 new test cases
+
+**Impact**:
+- Enables cross-referencing between mutation and workflow data
+- Provides labeled dataset with quality indicators
+- Maintains backward compatibility (new fields optional)
+
+Conceived by Romuald Członkowski - https://www.aiadvisors.pl/en
+
+## [2.22.17] - 2025-11-13
+
+### 🐛 Bug Fixes
+
+**Critical Telemetry Improvements**
+
+Fixed three critical issues in workflow mutation telemetry to improve data quality and security:
+
+#### 1. Fixed Inconsistent Sanitization (Security Critical)
+- **Problem**: 30% of workflows (178-188 records) were unsanitized, exposing potential credentials/tokens
+- **Solution**: Replaced weak inline sanitization with robust `WorkflowSanitizer.sanitizeWorkflowRaw()`
+- **Impact**: Now 100% sanitization coverage with 17 sensitive patterns detected and redacted
+- **Files Modified**:
+  - `src/telemetry/workflow-sanitizer.ts`: Added `sanitizeWorkflowRaw()` method
+  - `src/telemetry/mutation-tracker.ts`: Removed redundant sanitization code, use centralized sanitizer
+
+#### 2. Enabled Validation Data Capture (Data Quality Blocker)
+- **Problem**: Zero validation metrics captured (validation_before/after all NULL)
+- **Solution**: Added workflow validation before and after mutations using `WorkflowValidator`
+- **Impact**: Can now measure mutation quality, track error resolution patterns
+- **Implementation**:
+  - Validates workflows before mutation (captures baseline errors)
+  - Validates workflows after mutation (measures improvement)
+  - Non-blocking: validation errors don't prevent mutations
+  - Captures: errors, warnings, validation status
+- **Files Modified**:
+  - `src/mcp/handlers-workflow-diff.ts`: Added pre/post mutation validation
+
+#### 3. Improved Intent Capture (Data Quality)
+- **Problem**: 92.62% of intents were generic "Partial workflow update"
+- **Solution**: Enhanced tool documentation + automatic intent inference from operations
+- **Impact**: Meaningful intents automatically generated when not explicitly provided
+- **Implementation**:
+  - Enhanced documentation with specific intent examples and anti-patterns
+  - Added `inferIntentFromOperations()` function that generates meaningful intents:
+    - Single operations: "Add n8n-nodes-base.slack", "Connect webhook to HTTP Request"
+    - Multiple operations: "Workflow update: add 2 nodes, modify connections"
+  - Fallback inference when intent is missing, generic, or too short
+- **Files Modified**:
+  - `src/mcp/tool-docs/workflow_management/n8n-update-partial-workflow.ts`: Enhanced guidance
+  - `src/mcp/handlers-workflow-diff.ts`: Added intent inference logic
+
+### 📊 Expected Results
+
+After deployment, telemetry data should show:
+- **100% sanitization coverage** (up from 70%)
+- **100% validation capture** (up from 0%)
+- **50%+ meaningful intents** (up from 7.33%)
+- **Complete telemetry dataset** for analysis
+
+### 🎯 Technical Details
+
+**Sanitization Coverage**: Now detects and redacts:
+- Webhook URLs, API keys (OpenAI sk-*, GitHub ghp-*, etc.)
+- Bearer tokens, OAuth credentials, passwords
+- URLs with authentication, long tokens (20+ chars)
+- Sensitive field names (apiKey, token, secret, password, etc.)
+
+**Validation Metrics Captured**:
+- Workflow validity status (true/false)
+- Error/warning counts and details
+- Node configuration errors
+- Connection errors
+- Expression syntax errors
+- Validation improvement tracking (errors resolved/introduced)
+
+**Intent Inference Examples**:
+- `addNode` → "Add n8n-nodes-base.webhook"
+- `rewireConnection` → "Rewire IF from ErrorHandler to SuccessHandler"
+- Multiple operations → "Workflow update: add 2 nodes, modify connections, update metadata"
+
+## [2.22.16] - 2025-11-13
+
+### ✨ Enhanced Features
+
+**Workflow Mutation Telemetry for AI-Powered Workflow Assistance**
+
+Added comprehensive telemetry tracking for workflow mutations to enable more context-aware and intelligent responses when users modify their n8n workflows. The AI can better understand user intent and provide more relevant suggestions.
+
+#### Key Improvements
+
+1. **Intent Parameter for Better Context**
+   - Added `intent` parameter to `n8n_update_full_workflow` and `n8n_update_partial_workflow` tools
+   - Captures user's goals and reasoning behind workflow changes
+   - Example: "Add error handling for API failures" or "Migrate to new node versions"
+   - Helps AI provide more relevant and context-aware responses
+
+2. **Comprehensive Data Sanitization**
+   - Multi-layer sanitization at workflow, node, and parameter levels
+   - Removes credentials, API keys, tokens, and sensitive data
+   - Redacts URLs with authentication, long tokens (32+ chars), OpenAI-style keys
+   - Ensures telemetry data is safe while preserving structural patterns
+
+3. **Improved Auto-Flush Performance**
+   - Reduced mutation auto-flush threshold from 5 to 2 events
+   - Provides faster feedback and reduces data loss risk
+   - Balances database write efficiency with responsiveness
+
+4. **Enhanced Mutation Tracking**
+   - Tracks before/after workflow states with secure hashing
+   - Captures intent classification, operation types, and change metrics
+   - Records validation improvements (errors resolved/introduced)
+   - Monitors success rates, errors, and operation duration
+
+#### Technical Changes
+
+**Modified Files:**
+- `src/telemetry/mutation-tracker.ts`: Added comprehensive sanitization methods
+- `src/telemetry/telemetry-manager.ts`: Reduced auto-flush threshold, improved error logging
+- `src/mcp/handlers-workflow-diff.ts`: Added telemetry tracking integration
+- `src/mcp/tool-docs/workflow_management/n8n-update-full-workflow.ts`: Added intent parameter documentation
+- `src/mcp/tool-docs/workflow_management/n8n-update-partial-workflow.ts`: Added intent parameter documentation
+
+**New Test Files:**
+- `tests/unit/telemetry/mutation-tracker.test.ts`: 13 comprehensive sanitization tests
+- `tests/unit/telemetry/mutation-validator.test.ts`: 22 validation tests
+
+**Test Coverage:**
+- Added 35 new unit tests for mutation tracking and validation
+- All 357 telemetry-related tests passing
+- Coverage includes sanitization, validation, intent classification, and auto-flush behavior
+
+#### Impact
+
+Users will experience more helpful and context-aware AI responses when working with workflows. The AI can better understand:
+- What changes the user is trying to make
+- Why certain operations succeed or fail
+- Common patterns and best practices
+- How to suggest relevant improvements
+
+This feature is completely privacy-focused with comprehensive sanitization to protect sensitive data while capturing the structural patterns needed for better AI assistance.
+
 ## [2.22.15] - 2025-11-11
 
 ### 🔄 Dependencies
