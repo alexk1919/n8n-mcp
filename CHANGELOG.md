@@ -7,6 +7,418 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.27.2] - 2025-11-29
+
+### ✨ Enhanced Features
+
+**n8n_deploy_template: Deploy-First with Auto-Fix**
+
+Improved the template deployment tool to deploy first, then automatically fix common issues. This change dramatically improves deployment success rates for templates with expression format issues.
+
+#### Key Changes
+
+1. **Deploy-First Behavior**
+   - Templates are now deployed first without pre-validation
+   - Auto-fix runs automatically after deployment (configurable via `autoFix` parameter)
+   - Returns `fixesApplied` array showing all corrections made
+
+2. **Fixed Expression Validator False Positive**
+   - Fixed "nested expressions" detection that incorrectly flagged valid patterns
+   - Multiple expressions in one string like `={{ $a }} text {{ $b }}` now correctly pass validation
+   - Only truly nested patterns like `{{ {{ $json }} }}` are flagged as errors
+
+3. **Fixed Zod Schema Validation**
+   - Added missing `typeversion-upgrade` and `version-migration` fix types to autofix schema
+   - Prevents silent validation failures when autofix runs
+
+#### Usage
+
+```javascript
+// Deploy with auto-fix (default behavior)
+n8n_deploy_template({
+  templateId: 2776,
+  name: "My Workflow"
+})
+
+// Deploy without auto-fix (not recommended)
+n8n_deploy_template({
+  templateId: 2776,
+  autoFix: false
+})
+```
+
+#### Response
+
+```json
+{
+  "workflowId": "abc123",
+  "name": "My Workflow",
+  "fixesApplied": [
+    {
+      "node": "HTTP Request",
+      "field": "url",
+      "type": "expression-format",
+      "before": "https://api.com/{{ $json.id }}",
+      "after": "=https://api.com/{{ $json.id }}",
+      "confidence": "high"
+    }
+  ]
+}
+```
+
+#### Testing Results
+
+- 87% deployment success rate across 15 diverse templates
+- Auto-fix correctly adds `=` prefix to expressions missing it
+- Auto-fix correctly upgrades outdated typeVersions
+- Failed deployments are legitimate issues (missing community nodes, incomplete templates)
+
+**Conceived by Romuald Członkowski - [AiAdvisors](https://www.aiadvisors.pl/en)**
+
+## [2.27.1] - 2025-11-29
+
+### 🐛 Bug Fixes
+
+**Issue #454: Docker Image Missing Zod Fix from #450**
+
+Fixed Docker image build that was missing the pinned MCP SDK version, causing `n8n_create_workflow` Zod validation errors to persist in the 2.27.0 Docker image.
+
+#### Root Cause
+
+Two files were not updated when #450 pinned the SDK version in `package.json`:
+- `package.runtime.json` had `"@modelcontextprotocol/sdk": "^1.13.2"` instead of `"1.20.1"`
+- `Dockerfile` builder stage had `@modelcontextprotocol/sdk@^1.12.1` hardcoded
+
+The Docker runtime stage uses `package.runtime.json` (not `package.json`), and the builder stage has hardcoded dependency versions.
+
+#### Changes
+
+- **package.runtime.json**: Updated SDK to pinned version `"1.20.1"` (no caret)
+- **Dockerfile**: Updated builder stage SDK to `@1.20.1` and pinned `zod@3.24.1`
+
+#### Impact
+
+- Docker images now include the correct MCP SDK version with Zod fix
+- `n8n_create_workflow` and other workflow tools work correctly in Docker deployments
+- No changes to functionality - this is a build configuration fix
+
+Fixes #454
+
+**Conceived by Romuald Członkowski - [AiAdvisors](https://www.aiadvisors.pl/en)**
+
+## [2.27.0] - 2025-11-28
+
+### ✨ Features
+
+**n8n_deploy_template Tool**
+
+Added new tool for one-click deployment of n8n.io workflow templates directly to your n8n instance.
+
+#### Key Features
+
+- Fetches templates from n8n.io by ID
+- Automatically upgrades node typeVersions to latest supported
+- Validates workflow before deployment
+- Lists required credentials for configuration
+- Strips credential references (user configures in n8n UI)
+
+#### Usage
+
+```javascript
+n8n_deploy_template({
+  templateId: 2639,           // Required: template ID from n8n.io
+  name: "My Custom Name",     // Optional: custom workflow name
+  autoUpgradeVersions: true,  // Default: upgrade node versions
+  validate: true,             // Default: validate before deploy
+  stripCredentials: true      // Default: remove credential refs
+})
+```
+
+**Conceived by Romuald Członkowski - [AiAdvisors](https://www.aiadvisors.pl/en)**
+
+## [2.26.5] - 2025-11-27
+
+### 🔧 Fixed
+
+- **Tools Documentation: Runtime Token Optimization**
+  - Removed historical migration information from tool descriptions (e.g., "Replaces X, Y, Z...")
+  - Removed version-specific references (v2.21.1, issue #357) that are not needed at runtime
+  - Cleaned up consolidation comments in index.ts
+  - Documentation now starts directly with functional content for better AI agent efficiency
+  - Estimated savings: ~128 tokens per full documentation request
+  - Affected tools: `get_node`, `validate_node`, `search_templates`, `n8n_executions`, `n8n_get_workflow`, `n8n_update_partial_workflow`
+
+**Conceived by Romuald Członkowski - [AiAdvisors](https://www.aiadvisors.pl/en)**
+
+## [2.26.4] - 2025-11-26
+
+### 🔧 Fixed
+
+- **n8n 1.121 Compatibility**: Added support for new workflow settings introduced in n8n 1.121
+  - Added `availableInMCP` (boolean) to settings whitelist - controls "Available in MCP" toggle
+  - Added `callerPolicy` to settings whitelist - was already in schema but missing from sanitization
+  - Both settings are now preserved during workflow updates instead of being silently stripped
+  - Settings can be toggled via `updateSettings` operation: `{type: "updateSettings", settings: {availableInMCP: true}}`
+
+**Conceived by Romuald Członkowski - [AiAdvisors](https://www.aiadvisors.pl/en)**
+
+## [2.26.3] - 2025-11-26
+
+### 🔧 Fixed
+
+- **Tools Documentation Gaps**: Addressed remaining documentation issues after v2.26.2 tool consolidation
+  - Added missing `n8n_workflow_versions` documentation with all 6 modes (list, get, rollback, delete, prune, truncate)
+  - Removed non-existent tools (`n8n_diagnostic`, `n8n_list_available_tools`) from documentation exports
+  - Fixed 10+ outdated tool name references:
+    - `get_node_essentials` → `get_node({detail: "standard"})`
+    - `validate_node_operation` → `validate_node()`
+    - `get_minimal` → `n8n_get_workflow({mode: "minimal"})`
+  - Added missing `mode` and `verbose` parameters to `n8n_health_check` documentation
+  - Added missing `mode` parameter to `get_template` documentation (nodes_only, structure, full)
+  - Updated template count from "399+" to "2,700+" in `get_template`
+  - Updated node count from "525" to "500+" in `search_nodes`
+  - Fixed `relatedTools` arrays to remove references to non-existent tools
+
+**Conceived by Romuald Członkowski - [AiAdvisors](https://www.aiadvisors.pl/en)**
+
+## [2.26.2] - 2025-11-25
+
+### 🔧 Fixed
+
+- **Tool Documentation Cleanup**: Synchronized `tool-docs/` with v2.26.0 tool consolidation
+  - Deleted 23 obsolete documentation files for removed tools (get_node_info, get_node_essentials, validate_node_operation, etc.)
+  - Created consolidated documentation for `get_node` (covers all modes: info, docs, search_properties, versions, compare, breaking, migrations)
+  - Created consolidated documentation for `validate_node` (covers modes: full, minimal; profiles: minimal, runtime, ai-friendly, strict)
+  - Created consolidated documentation for `n8n_executions` (covers actions: get, list, delete)
+  - Updated `search_templates` documentation with all searchModes (keyword, by_nodes, by_task, by_metadata)
+  - Updated `n8n_get_workflow` documentation with all modes (full, details, structure, minimal)
+  - Fixed stale `relatedTools` references pointing to removed tools
+  - Updated `tools-documentation.ts` overview to accurately reflect 19 consolidated tools
+
+## [2.26.1] - 2025-11-25
+
+### 🔄 Updated
+
+- Updated n8n from 1.120.3 to 1.121.2
+- Updated n8n-core from 1.119.2 to 1.120.1
+- Updated n8n-workflow from 1.117.0 to 1.118.1
+- Updated @n8n/n8n-nodes-langchain from 1.119.1 to 1.120.1
+- Rebuilt node database with 545 nodes (439 from n8n-nodes-base, 106 from @n8n/n8n-nodes-langchain)
+- Expanded template database from ~2,598 to 2,768 templates (+170 new templates)
+- Updated README badge with new n8n version
+
+## [2.26.0] - 2025-01-25
+
+### ✨ Features
+
+**Tool Consolidation - Reduced Tool Count by 38%**
+
+Major consolidation of MCP tools from 31 tools to 19 tools, using mode-based parameters for better AI agent ergonomics. This reduces cognitive load for AI agents while maintaining full functionality.
+
+#### Consolidated Tools
+
+**1. Node Tools - `get_node` Enhanced**
+
+The `get_node` tool now supports additional modes:
+- `mode='docs'`: Replaces `get_node_documentation` - returns readable docs with examples
+- `mode='search_properties'`: Replaces `search_node_properties` - search within node properties
+
+```javascript
+// Old: get_node_documentation
+get_node_documentation({nodeType: "nodes-base.slack"})
+// New: mode='docs'
+get_node({nodeType: "nodes-base.slack", mode: "docs"})
+
+// Old: search_node_properties
+search_node_properties({nodeType: "nodes-base.httpRequest", query: "auth"})
+// New: mode='search_properties'
+get_node({nodeType: "nodes-base.httpRequest", mode: "search_properties", propertyQuery: "auth"})
+```
+
+**2. Validation Tools - `validate_node` Unified**
+
+Consolidated `validate_node_operation` and `validate_node_minimal` into single `validate_node`:
+- `mode='full'`: Full validation (replaces `validate_node_operation`)
+- `mode='minimal'`: Quick required fields check (replaces `validate_node_minimal`)
+
+```javascript
+// Old: validate_node_operation
+validate_node_operation({nodeType: "nodes-base.slack", config: {...}})
+// New: mode='full' (default)
+validate_node({nodeType: "nodes-base.slack", config: {...}, mode: "full"})
+
+// Old: validate_node_minimal
+validate_node_minimal({nodeType: "nodes-base.slack", config: {}})
+// New: mode='minimal'
+validate_node({nodeType: "nodes-base.slack", config: {}, mode: "minimal"})
+```
+
+**3. Template Tools - `search_templates` Enhanced**
+
+Consolidated `list_node_templates`, `search_templates_by_metadata`, and `get_templates_for_task`:
+- `searchMode='keyword'`: Search by keywords (default, was `search_templates`)
+- `searchMode='by_nodes'`: Search by node types (was `list_node_templates`)
+- `searchMode='by_metadata'`: Search by AI metadata (was `search_templates_by_metadata`)
+- `searchMode='by_task'`: Search by task type (was `get_templates_for_task`)
+
+```javascript
+// Old: list_node_templates
+list_node_templates({nodeTypes: ["n8n-nodes-base.httpRequest"]})
+// New: searchMode='by_nodes'
+search_templates({searchMode: "by_nodes", nodeTypes: ["n8n-nodes-base.httpRequest"]})
+
+// Old: get_templates_for_task
+get_templates_for_task({task: "webhook_processing"})
+// New: searchMode='by_task'
+search_templates({searchMode: "by_task", task: "webhook_processing"})
+```
+
+**4. Workflow Getters - `n8n_get_workflow` Enhanced**
+
+Consolidated `n8n_get_workflow_details`, `n8n_get_workflow_structure`, `n8n_get_workflow_minimal`:
+- `mode='full'`: Complete workflow data (default)
+- `mode='details'`: Workflow with metadata (was `n8n_get_workflow_details`)
+- `mode='structure'`: Nodes and connections only (was `n8n_get_workflow_structure`)
+- `mode='minimal'`: ID, name, active status (was `n8n_get_workflow_minimal`)
+
+```javascript
+// Old: n8n_get_workflow_details
+n8n_get_workflow_details({id: "123"})
+// New: mode='details'
+n8n_get_workflow({id: "123", mode: "details"})
+
+// Old: n8n_get_workflow_minimal
+n8n_get_workflow_minimal({id: "123"})
+// New: mode='minimal'
+n8n_get_workflow({id: "123", mode: "minimal"})
+```
+
+**5. Execution Tools - `n8n_executions` Unified**
+
+Consolidated `n8n_list_executions`, `n8n_get_execution`, `n8n_delete_execution`:
+- `action='list'`: List executions with filters
+- `action='get'`: Get single execution details
+- `action='delete'`: Delete an execution
+
+```javascript
+// Old: n8n_list_executions
+n8n_list_executions({workflowId: "123", status: "success"})
+// New: action='list'
+n8n_executions({action: "list", workflowId: "123", status: "success"})
+
+// Old: n8n_get_execution
+n8n_get_execution({id: "456"})
+// New: action='get'
+n8n_executions({action: "get", id: "456"})
+
+// Old: n8n_delete_execution
+n8n_delete_execution({id: "456"})
+// New: action='delete'
+n8n_executions({action: "delete", id: "456"})
+```
+
+### 🗑️ Removed Tools
+
+The following tools have been removed (use consolidated equivalents):
+- `get_node_documentation` → `get_node` with `mode='docs'`
+- `search_node_properties` → `get_node` with `mode='search_properties'`
+- `get_property_dependencies` → Removed (use `validate_node` for dependency info)
+- `validate_node_operation` → `validate_node` with `mode='full'`
+- `validate_node_minimal` → `validate_node` with `mode='minimal'`
+- `list_node_templates` → `search_templates` with `searchMode='by_nodes'`
+- `search_templates_by_metadata` → `search_templates` with `searchMode='by_metadata'`
+- `get_templates_for_task` → `search_templates` with `searchMode='by_task'`
+- `n8n_get_workflow_details` → `n8n_get_workflow` with `mode='details'`
+- `n8n_get_workflow_structure` → `n8n_get_workflow` with `mode='structure'`
+- `n8n_get_workflow_minimal` → `n8n_get_workflow` with `mode='minimal'`
+- `n8n_list_executions` → `n8n_executions` with `action='list'`
+- `n8n_get_execution` → `n8n_executions` with `action='get'`
+- `n8n_delete_execution` → `n8n_executions` with `action='delete'`
+
+### 📊 Impact
+
+**Tool Count**: 31 → 19 tools (38% reduction)
+
+**For AI Agents:**
+- Fewer tools to choose from reduces decision complexity
+- Mode-based parameters provide clear action disambiguation
+- Consistent patterns across tool categories
+- Backward-compatible parameter handling
+
+**For Users:**
+- Simpler tool discovery and documentation
+- Consistent API design patterns
+- Reduced token usage in tool descriptions
+
+### 🔧 Technical Details
+
+**Files Modified:**
+- `src/mcp/tools.ts` - Consolidated tool definitions
+- `src/mcp/tools-n8n-manager.ts` - n8n manager tool consolidation
+- `src/mcp/server.ts` - Handler consolidation and mode routing
+- `tests/unit/mcp/parameter-validation.test.ts` - Updated for new tool names
+- `tests/integration/mcp-protocol/tool-invocation.test.ts` - Updated test cases
+- `tests/integration/mcp-protocol/error-handling.test.ts` - Updated error handling tests
+
+**Conceived by Romuald Członkowski - [AiAdvisors](https://www.aiadvisors.pl/en)**
+
+## [2.24.1] - 2025-01-24
+
+### ✨ Features
+
+**Session Persistence API**
+
+Added export/restore functionality for MCP sessions to enable zero-downtime deployments in container environments (Kubernetes, Docker Swarm, etc.).
+
+#### What's New
+
+**1. Export Session State**
+- `exportSessionState()` method in `SingleSessionHTTPServer` and `N8NMCPEngine`
+- Exports all active sessions with metadata and instance context
+- Automatically filters expired sessions
+- Returns serializable `SessionState[]` array
+
+**2. Restore Session State**
+- `restoreSessionState(sessions)` method for session recovery
+- Validates session structure using existing `validateInstanceContext()`
+- Handles null/invalid sessions gracefully with warnings
+- Enforces MAX_SESSIONS limit (100 concurrent sessions)
+- Skips expired sessions during restore
+
+**3. SessionState Type**
+- New type definition in `src/types/session-state.ts`
+- Fully documented with JSDoc comments
+- Includes metadata (timestamps) and context (credentials)
+- Exported from main package index
+
+**4. Dormant Session Behavior**
+- Restored sessions are "dormant" until first request
+- Transport and server objects recreated on-demand
+- Memory-efficient session recovery
+
+#### Security Considerations
+
+⚠️ **IMPORTANT:** Exported session data contains plaintext n8n API keys. Downstream applications MUST encrypt session data before persisting to disk using AES-256-GCM or equivalent.
+
+#### Use Cases
+- Zero-downtime deployments in container orchestration
+- Session recovery after crashes or restarts
+- Multi-tenant platform session management
+- Rolling updates without user disruption
+
+#### Testing
+- 22 comprehensive unit tests (100% passing)
+- Tests cover export, restore, edge cases, and round-trip cycles
+- Validation of expired session filtering and error handling
+
+#### Implementation Details
+- Only exports sessions with valid `n8nApiUrl` and `n8nApiKey` in context
+- Respects `sessionTimeout` setting (default 30 minutes)
+- Session metadata and context persisted; transport/server recreated on-demand
+- Comprehensive error handling with detailed logging
+
+**Conceived by Romuald Członkowski - [AiAdvisors](https://www.aiadvisors.pl/en)**
+
 ## [2.24.0] - 2025-01-24
 
 ### ✨ Features

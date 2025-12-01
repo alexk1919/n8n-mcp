@@ -34,6 +34,7 @@ import { ExpressionFormatValidator, ExpressionFormatIssue } from '../services/ex
 import { WorkflowVersioningService } from '../services/workflow-versioning-service';
 import { handleUpdatePartialWorkflow } from './handlers-workflow-diff';
 import { telemetry } from '../telemetry';
+import { TemplateService } from '../templates/template-service';
 import {
   createCacheKey,
   createInstanceCache,
@@ -82,6 +83,31 @@ interface HealthCheckResponseData {
 interface CloudPlatformGuide {
   name: string;
   troubleshooting: string[];
+}
+
+/**
+ * Applied Fix from Auto-Fix Operation
+ */
+interface AppliedFix {
+  node: string;
+  field: string;
+  type: string;
+  before: string;
+  after: string;
+  confidence: string;
+}
+
+/**
+ * Auto-Fix Result Data from handleAutofixWorkflow
+ */
+interface AutofixResultData {
+  fixesApplied?: number;
+  fixes?: AppliedFix[];
+  workflowId?: string;
+  workflowName?: string;
+  message?: string;
+  summary?: string;
+  stats?: Record<string, number>;
 }
 
 /**
@@ -395,7 +421,9 @@ const autofixWorkflowSchema = z.object({
     'typeversion-correction',
     'error-output-config',
     'node-type-correction',
-    'webhook-missing-path'
+    'webhook-missing-path',
+    'typeversion-upgrade',
+    'version-migration'
   ])).optional(),
   confidenceThreshold: z.enum(['high', 'medium', 'low']).optional().default('medium'),
   maxFixes: z.number().optional().default(50)
@@ -1553,7 +1581,7 @@ export async function handleHealthCheck(context?: InstanceContext): Promise<McpT
             '1. Verify n8n instance is running',
             '2. Check N8N_API_URL is correct',
             '3. Verify N8N_API_KEY has proper permissions',
-            '4. Run n8n_diagnostic for detailed analysis'
+            '4. Run n8n_health_check with mode="diagnostic" for detailed analysis'
           ]
         }
       };
@@ -1564,63 +1592,6 @@ export async function handleHealthCheck(context?: InstanceContext): Promise<McpT
       error: error instanceof Error ? error.message : 'Unknown error occurred'
     };
   }
-}
-
-export async function handleListAvailableTools(context?: InstanceContext): Promise<McpToolResponse> {
-  const tools = [
-    {
-      category: 'Workflow Management',
-      tools: [
-        { name: 'n8n_create_workflow', description: 'Create new workflows' },
-        { name: 'n8n_get_workflow', description: 'Get workflow by ID' },
-        { name: 'n8n_get_workflow_details', description: 'Get detailed workflow info with stats' },
-        { name: 'n8n_get_workflow_structure', description: 'Get simplified workflow structure' },
-        { name: 'n8n_get_workflow_minimal', description: 'Get minimal workflow info' },
-        { name: 'n8n_update_workflow', description: 'Update existing workflows' },
-        { name: 'n8n_delete_workflow', description: 'Delete workflows' },
-        { name: 'n8n_list_workflows', description: 'List workflows with filters' },
-        { name: 'n8n_validate_workflow', description: 'Validate workflow from n8n instance' },
-        { name: 'n8n_autofix_workflow', description: 'Automatically fix common workflow errors' }
-      ]
-    },
-    {
-      category: 'Execution Management',
-      tools: [
-        { name: 'n8n_trigger_webhook_workflow', description: 'Trigger workflows via webhook' },
-        { name: 'n8n_get_execution', description: 'Get execution details' },
-        { name: 'n8n_list_executions', description: 'List executions with filters' },
-        { name: 'n8n_delete_execution', description: 'Delete execution records' }
-      ]
-    },
-    {
-      category: 'System',
-      tools: [
-        { name: 'n8n_health_check', description: 'Check API connectivity' },
-        { name: 'n8n_list_available_tools', description: 'List all available tools' }
-      ]
-    }
-  ];
-  
-  const config = getN8nApiConfig();
-  const apiConfigured = config !== null;
-  
-  return {
-    success: true,
-    data: {
-      tools,
-      apiConfigured,
-      configuration: config ? {
-        apiUrl: config.baseUrl,
-        timeout: config.timeout,
-        maxRetries: config.maxRetries
-      } : null,
-      limitations: [
-        'Cannot execute workflows directly (must use webhooks)',
-        'Cannot stop running executions',
-        'Tags and credentials have limited API support'
-      ]
-    }
-  };
 }
 
 // Environment-aware debugging helpers
@@ -1844,8 +1815,8 @@ export async function handleDiagnostic(request: any, context?: InstanceContext):
   }
 
   // Check which tools are available
-  const documentationTools = 22; // Base documentation tools
-  const managementTools = apiConfigured ? 16 : 0;
+  const documentationTools = 7; // Base documentation tools (after v2.26.0 consolidation)
+  const managementTools = apiConfigured ? 13 : 0; // Management tools requiring API (includes n8n_deploy_template)
   const totalTools = documentationTools + managementTools;
 
   // Check npm version
@@ -1981,7 +1952,7 @@ export async function handleDiagnostic(request: any, context?: InstanceContext):
             example: 'validate_workflow({workflow: {...}})'
           }
         ],
-        note: '22 documentation tools available without API configuration'
+        note: '14 documentation tools available without API configuration'
       },
       whatYouCannotDo: [
         '✗ Create/update workflows in n8n instance',
@@ -1996,8 +1967,8 @@ export async function handleDiagnostic(request: any, context?: InstanceContext):
           '   N8N_API_URL=https://your-n8n-instance.com',
           '   N8N_API_KEY=your_api_key_here',
           '3. Restart the MCP server',
-          '4. Run n8n_diagnostic again to verify',
-          '5. All 38 tools will be available!'
+          '4. Run n8n_health_check with mode="diagnostic" to verify',
+          '5. All 19 tools will be available!'
         ],
         documentation: 'https://github.com/czlonkowski/n8n-mcp?tab=readme-ov-file#n8n-management-tools-optional---requires-api-configuration'
       }
@@ -2237,6 +2208,238 @@ export async function handleWorkflowVersions(
         success: false,
         error: 'Invalid input',
         details: { errors: error.errors }
+      };
+    }
+
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred'
+    };
+  }
+}
+
+// ========================================================================
+// Template Deployment Handler
+// ========================================================================
+
+const deployTemplateSchema = z.object({
+  templateId: z.number().positive().int(),
+  name: z.string().optional(),
+  autoUpgradeVersions: z.boolean().default(true),
+  autoFix: z.boolean().default(true),  // Auto-apply fixes after deployment
+  stripCredentials: z.boolean().default(true)
+});
+
+interface RequiredCredential {
+  nodeType: string;
+  nodeName: string;
+  credentialType: string;
+}
+
+/**
+ * Deploy a workflow template from n8n.io directly to the user's n8n instance.
+ *
+ * This handler:
+ * 1. Fetches the template from the local template database
+ * 2. Extracts credential requirements for user guidance
+ * 3. Optionally strips credentials (for user to configure in n8n UI)
+ * 4. Optionally upgrades node typeVersions to latest supported
+ * 5. Optionally validates the workflow structure
+ * 6. Creates the workflow in the n8n instance
+ */
+export async function handleDeployTemplate(
+  args: unknown,
+  templateService: TemplateService,
+  repository: NodeRepository,
+  context?: InstanceContext
+): Promise<McpToolResponse> {
+  try {
+    const client = ensureApiConfigured(context);
+    const input = deployTemplateSchema.parse(args);
+
+    // Fetch template
+    const template = await templateService.getTemplate(input.templateId, 'full');
+    if (!template) {
+      return {
+        success: false,
+        error: `Template ${input.templateId} not found`,
+        details: {
+          hint: 'Use search_templates to find available templates',
+          templateUrl: `https://n8n.io/workflows/${input.templateId}`
+        }
+      };
+    }
+
+    // Extract workflow from template (deep copy to avoid mutation)
+    const workflow = JSON.parse(JSON.stringify(template.workflow));
+    if (!workflow || !workflow.nodes) {
+      return {
+        success: false,
+        error: 'Template has invalid workflow structure',
+        details: { templateId: input.templateId }
+      };
+    }
+
+    // Set workflow name
+    const workflowName = input.name || template.name;
+
+    // Collect required credentials before stripping
+    const requiredCredentials: RequiredCredential[] = [];
+    for (const node of workflow.nodes) {
+      if (node.credentials && typeof node.credentials === 'object') {
+        for (const [credType] of Object.entries(node.credentials)) {
+          requiredCredentials.push({
+            nodeType: node.type,
+            nodeName: node.name,
+            credentialType: credType
+          });
+        }
+      }
+    }
+
+    // Strip credentials if requested
+    if (input.stripCredentials) {
+      workflow.nodes = workflow.nodes.map((node: any) => {
+        const { credentials, ...rest } = node;
+        return rest;
+      });
+    }
+
+    // Auto-upgrade typeVersions if requested
+    if (input.autoUpgradeVersions) {
+      const autoFixer = new WorkflowAutoFixer(repository);
+
+      // Run validation to get issues to fix
+      const validator = new WorkflowValidator(repository, EnhancedConfigValidator);
+      const validationResult = await validator.validateWorkflow(workflow, {
+        validateNodes: true,
+        validateConnections: false,
+        validateExpressions: false,
+        profile: 'runtime'
+      });
+
+      // Generate fixes focused on typeVersion upgrades
+      const fixResult = await autoFixer.generateFixes(
+        workflow,
+        validationResult,
+        [],
+        { fixTypes: ['typeversion-upgrade', 'typeversion-correction'] }
+      );
+
+      // Apply fixes to workflow
+      if (fixResult.operations.length > 0) {
+        for (const op of fixResult.operations) {
+          if (op.type === 'updateNode' && op.updates) {
+            const node = workflow.nodes.find((n: any) =>
+              n.id === op.nodeId || n.name === op.nodeName
+            );
+            if (node) {
+              for (const [path, value] of Object.entries(op.updates)) {
+                if (path === 'typeVersion') {
+                  node.typeVersion = value;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Identify trigger type
+    const triggerNode = workflow.nodes.find((n: any) =>
+      n.type?.includes('Trigger') ||
+      n.type?.includes('webhook') ||
+      n.type === 'n8n-nodes-base.webhook'
+    );
+    const triggerType = triggerNode?.type?.split('.').pop() || 'manual';
+
+    // Create workflow via API (always creates inactive)
+    // Deploy first, then fix - this ensures the workflow exists before we modify it
+    const createdWorkflow = await client.createWorkflow({
+      name: workflowName,
+      nodes: workflow.nodes,
+      connections: workflow.connections,
+      settings: workflow.settings || { executionOrder: 'v1' }
+    });
+
+    // Get base URL for workflow link
+    const apiConfig = context ? getN8nApiConfigFromContext(context) : getN8nApiConfig();
+    const baseUrl = apiConfig?.baseUrl?.replace('/api/v1', '') || '';
+
+    // Auto-fix common issues after deployment (expression format, etc.)
+    let fixesApplied: AppliedFix[] = [];
+    let fixSummary = '';
+    let autoFixStatus: 'success' | 'failed' | 'skipped' = 'skipped';
+
+    if (input.autoFix) {
+      try {
+        // Run autofix on the deployed workflow
+        const autofixResult = await handleAutofixWorkflow(
+          {
+            id: createdWorkflow.id,
+            applyFixes: true,
+            fixTypes: ['expression-format', 'typeversion-upgrade'],
+            confidenceThreshold: 'medium'
+          },
+          repository,
+          context
+        );
+
+        if (autofixResult.success && autofixResult.data) {
+          const fixData = autofixResult.data as AutofixResultData;
+          autoFixStatus = 'success';
+          if (fixData.fixesApplied && fixData.fixesApplied > 0) {
+            fixesApplied = fixData.fixes || [];
+            fixSummary = ` Auto-fixed ${fixData.fixesApplied} issue(s).`;
+          }
+        }
+      } catch (fixError) {
+        // Log but don't fail - autofix is best-effort
+        autoFixStatus = 'failed';
+        logger.warn('Auto-fix failed after template deployment', {
+          workflowId: createdWorkflow.id,
+          error: fixError instanceof Error ? fixError.message : 'Unknown error'
+        });
+        fixSummary = ' Auto-fix failed (workflow deployed successfully).';
+      }
+    }
+
+    return {
+      success: true,
+      data: {
+        workflowId: createdWorkflow.id,
+        name: createdWorkflow.name,
+        active: false,
+        nodeCount: workflow.nodes.length,
+        triggerType,
+        requiredCredentials: requiredCredentials.length > 0 ? requiredCredentials : undefined,
+        url: baseUrl ? `${baseUrl}/workflow/${createdWorkflow.id}` : undefined,
+        templateId: input.templateId,
+        templateUrl: template.url || `https://n8n.io/workflows/${input.templateId}`,
+        autoFixStatus,
+        fixesApplied: fixesApplied.length > 0 ? fixesApplied : undefined
+      },
+      message: `Workflow "${createdWorkflow.name}" deployed successfully from template ${input.templateId}.${fixSummary} ${
+        requiredCredentials.length > 0
+          ? `Configure ${requiredCredentials.length} credential(s) in n8n to activate.`
+          : ''
+      }`
+    };
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return {
+        success: false,
+        error: 'Invalid input',
+        details: { errors: error.errors }
+      };
+    }
+
+    if (error instanceof N8nApiError) {
+      return {
+        success: false,
+        error: getUserFriendlyErrorMessage(error),
+        code: error.code,
+        details: error.details as Record<string, unknown> | undefined
       };
     }
 
