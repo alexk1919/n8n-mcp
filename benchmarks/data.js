@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1764001099823,
+  "lastUpdate": 1764581666126,
   "repoUrl": "https://github.com/alexk1919/n8n-mcp",
   "entries": {
     "n8n-mcp Benchmarks": [
@@ -251,6 +251,37 @@ window.BENCHMARK_DATA = {
           "url": "https://github.com/alexk1919/n8n-mcp/commit/130cf68a4f01300e51ac955e8f730bee21b9b45d"
         },
         "date": 1764001099563,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "sample - array sorting - small",
+            "value": 0.0136,
+            "range": "0.3096",
+            "unit": "ms",
+            "extra": "73341 ops/sec"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "54913409+alexk1919@users.noreply.github.com",
+            "name": "Alex Kim",
+            "username": "alexk1919"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ba3756bedd4b0e88697ec6d8fc7183752ea1f44c",
+          "message": "Merge branch 'czlonkowski:main' into main",
+          "timestamp": "2025-12-01T01:32:30-08:00",
+          "tree_id": "7e9cb970517e2996277e275f05c102d82f14b77c",
+          "url": "https://github.com/alexk1919/n8n-mcp/commit/ba3756bedd4b0e88697ec6d8fc7183752ea1f44c"
+        },
+        "date": 1764581665857,
         "tool": "customSmallerIsBetter",
         "benches": [
           {
