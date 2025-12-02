@@ -1176,9 +1176,9 @@ export class N8NDocumentationMCPServer {
         await this.ensureInitialized();
         if (!this.repository) throw new Error('Repository not initialized');
         return n8nHandlers.handleAutofixWorkflow(args, this.repository, this.instanceContext);
-      case 'n8n_trigger_webhook_workflow':
-        this.validateToolParams(name, args, ['webhookUrl']);
-        return n8nHandlers.handleTriggerWebhookWorkflow(args, this.instanceContext);
+      case 'n8n_test_workflow':
+        this.validateToolParams(name, args, ['workflowId']);
+        return n8nHandlers.handleTestWorkflow(args, this.instanceContext);
       case 'n8n_executions': {
         this.validateToolParams(name, args, ['action']);
         const execAction = args.action;
@@ -2203,14 +2203,19 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
     // Get operations (already parsed by repository)
     const operations = node.operations || [];
     
+    // Get the latest version - this is important for AI to use correct typeVersion
+    const latestVersion = node.version ?? '1';
+
     const result = {
       nodeType: node.nodeType,
       workflowNodeType: getWorkflowNodeType(node.package ?? 'n8n-nodes-base', node.nodeType),
       displayName: node.displayName,
       description: node.description,
       category: node.category,
-      version: node.version ?? '1',
+      version: latestVersion,
       isVersioned: node.isVersioned ?? false,
+      // Prominent warning to use the correct typeVersion
+      versionNotice: `⚠️ Use typeVersion: ${latestVersion} when creating this node`,
       requiredProperties: essentials.required,
       commonProperties: essentials.common,
       operations: operations.map((op: any) => ({

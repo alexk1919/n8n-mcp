@@ -7,6 +7,201 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.28.2] - 2025-12-01
+
+### Bug Fixes
+
+**n8n_test_workflow: webhookId Resolution**
+
+Fixed critical bug where trigger handlers used `node.id` instead of `node.webhookId` for building webhook URLs. This caused chat/form/webhook triggers to fail with 404 errors when nodes had custom IDs.
+
+- **Root Cause**: `extractWebhookPath()` in `trigger-detector.ts` fell back to `node.id` instead of checking `node.webhookId` first
+- **Fix**: Added `webhookId` to `WorkflowNode` type and updated priority: `params.path` > `webhookId` > `node.id`
+- **Files**: `src/triggers/trigger-detector.ts`, `src/types/n8n-api.ts`
+
+**n8n_test_workflow: Chat Trigger URL Pattern**
+
+Fixed chat triggers using wrong URL pattern. n8n chat triggers require `/webhook/<id>/chat` suffix.
+
+- **Root Cause**: `buildTriggerUrl()` used same pattern for webhooks and chat triggers
+- **Fix**: Chat triggers now correctly use `/webhook/<webhookId>/chat` endpoint
+- **Files**: `src/triggers/trigger-detector.ts:284-289`
+
+**n8n_test_workflow: Form Trigger Content-Type**
+
+Fixed form triggers failing with "Expected multipart/form-data" error.
+
+- **Root Cause**: Form handler sent `application/json` but n8n requires `multipart/form-data`
+- **Fix**: Switched to `form-data` library for proper multipart encoding
+- **Files**: `src/triggers/handlers/form-handler.ts`
+
+### Enhancements
+
+**Form Handler: Complete Field Type Support**
+
+Enhanced form handler to support all n8n form field types with intelligent handling:
+
+- **Supported Types**: text, textarea, email, number, password, date, dropdown, checkbox, file, hidden, html
+- **Checkbox Arrays**: Automatically converts arrays to `field[]` format required by n8n
+- **File Uploads**: Supports base64 content or sends empty placeholder for required files
+- **Helpful Warnings**: Reports missing required fields with field names and labels
+- **Error Hints**: On failure, provides complete field structure with usage examples
+
+```javascript
+// Example with all field types
+n8n_test_workflow({
+  workflowId: "abc123",
+  data: {
+    "field-0": "text value",
+    "field-1": ["checkbox1", "checkbox2"],  // Array for checkboxes
+    "field-2": "dropdown_option",
+    "field-3": "2025-01-15",                // Date format
+    "field-4": "user@example.com",
+    "field-5": 42,                          // Number
+    "field-6": "password123"
+  }
+})
+```
+
+**Conceived by Romuald Członkowski - [AiAdvisors](https://www.aiadvisors.pl/en)**
+
+## [2.28.1] - 2025-12-01
+
+### 🐛 Bug Fixes
+
+**Issue #458: AI Connection Type Propagation**
+
+Fixed `addConnection` operation in workflow diff engine defaulting `targetInput` to "main" instead of preserving the source output type. This caused AI tool connections to be created with incorrect type.
+
+- **Root Cause**: `targetInput` defaulted to `'main'` regardless of `sourceOutput` type
+- **Fix**: Changed default to `sourceOutput` to preserve connection type (ai_tool, ai_memory, ai_languageModel)
+- **Files**: `src/services/workflow-diff-engine.ts:760`
+
+**AI Agent Validation False Positive**
+
+Fixed false positive "AI Agent has no tools connected" warning when tools were properly connected.
+
+- **Root Cause**: Validation checked connections FROM agent instead of TO agent
+- **Fix**: Search all connections where target node is the agent
+- **Files**: `src/services/workflow-validator.ts:1148-1163`
+
+### ✨ Enhancements
+
+**get_node: expectedFormat for resourceLocator Properties**
+
+Added `expectedFormat` field to resourceLocator properties in `get_node` output. This helps AI models understand the correct format for these complex property types.
+
+```json
+{
+  "name": "model",
+  "type": "resourceLocator",
+  "expectedFormat": {
+    "structure": { "mode": "string", "value": "string" },
+    "modes": ["list", "id"],
+    "example": { "mode": "id", "value": "gpt-4o-mini" }
+  }
+}
+```
+
+**get_node: versionNotice Field**
+
+Added `versionNotice` field to make typeVersion more prominent in get_node output, reducing the chance of AI models using outdated versions.
+
+```json
+{
+  "version": "1.3",
+  "versionNotice": "⚠️ Use typeVersion: 1.3 when creating this node"
+}
+```
+
+**Conceived by Romuald Członkowski - [AiAdvisors](https://www.aiadvisors.pl/en)**
+
+## [2.28.0] - 2025-12-01
+
+### ✨ Features
+
+**n8n_test_workflow: Unified Workflow Trigger Tool**
+
+Replaced `n8n_trigger_webhook_workflow` with a new unified `n8n_test_workflow` tool that supports multiple trigger types with auto-detection.
+
+#### Key Features
+
+1. **Auto-Detection of Trigger Type**
+   - Automatically analyzes workflow to detect trigger type (webhook, form, or chat)
+   - No need to specify triggerType unless you want to override detection
+
+2. **Multi-Trigger Support**
+   - **Webhook**: HTTP-based triggers (GET/POST/PUT/DELETE) with custom headers and data
+   - **Form**: Form submission triggers with form field data
+   - **Chat**: AI chat triggers with message and session continuity
+
+3. **SSRF Protection**
+   - All trigger handlers include SSRF URL validation
+   - Blocks requests to private networks, cloud metadata endpoints
+   - Configurable security modes (strict/moderate/permissive)
+
+4. **Extensible Handler Architecture**
+   - Plugin-based trigger handler system
+   - Registry pattern for easy extension
+   - Clean separation of concerns
+
+#### Usage
+
+```javascript
+// Auto-detect trigger type (recommended)
+n8n_test_workflow({workflowId: "123"})
+
+// Webhook with data
+n8n_test_workflow({
+  workflowId: "123",
+  triggerType: "webhook",
+  httpMethod: "POST",
+  data: {name: "John", email: "john@example.com"}
+})
+
+// Chat trigger
+n8n_test_workflow({
+  workflowId: "123",
+  triggerType: "chat",
+  message: "Hello AI assistant",
+  sessionId: "conversation-123"
+})
+
+// Form submission
+n8n_test_workflow({
+  workflowId: "123",
+  triggerType: "form",
+  data: {email: "test@example.com", name: "Test User"}
+})
+```
+
+#### Breaking Changes
+
+- **Removed**: `n8n_trigger_webhook_workflow` tool
+- **Replaced by**: `n8n_test_workflow` with enhanced capabilities
+- **Migration**: Change tool name and add `workflowId` parameter (previously `webhookUrl`)
+
+#### Technical Details
+
+**New Files:**
+- `src/triggers/` - Complete trigger system module
+  - `types.ts` - Type definitions for all trigger types
+  - `trigger-detector.ts` - Auto-detection logic
+  - `trigger-registry.ts` - Handler registration
+  - `handlers/` - Individual handler implementations
+
+**Modified Files:**
+- `src/mcp/handlers-n8n-manager.ts` - New `handleTestWorkflow` function
+- `src/mcp/tools-n8n-manager.ts` - Updated tool definition
+- `src/mcp/tool-docs/workflow_management/` - New documentation
+
+**Test Coverage:**
+- 32 unit tests for trigger detection and registry
+- 30 unit tests for SSRF protection
+- All parameter validation tests updated
+
+**Conceived by Romuald Członkowski - [AiAdvisors](https://www.aiadvisors.pl/en)**
+
 ## [2.27.2] - 2025-11-29
 
 ### ✨ Enhanced Features
