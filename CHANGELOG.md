@@ -7,6 +7,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.28.8] - 2025-12-07
+
+### Bug Fixes
+
+**Multi-tenant: handleValidateWorkflow missing context parameter (#474)**
+
+Fixed `n8n_validate_workflow` tool failing in multi-tenant mode with error:
+`"n8n API not configured. Please set N8N_API_URL and N8N_API_KEY environment variables."`
+
+- **Root Cause**: `handleValidateWorkflow` called `handleGetWorkflow` without passing the `context` parameter
+- **Impact**: Multi-tenant deployments could not use the `n8n_validate_workflow` tool
+- **Solution**: Pass `context` parameter to `handleGetWorkflow` call (line 987)
+
+**Conceived by Romuald Członkowski - [AiAdvisors](https://www.aiadvisors.pl/en)**
+
+## [2.28.7] - 2025-12-05
+
+### Bug Fixes
+
+**Memory Leak: MCP Server Cleanup on Session Removal (#471)**
+
+Fixed memory leak where `N8NDocumentationMCPServer` objects were not properly closed when sessions were removed, causing memory growth over time.
+
+- **Root Cause**: `removeSession()` deleted server from map but didn't call cleanup methods
+- **Evidence**: Production server memory grew from ~10% to ~35% in 43 minutes (~1GB growth with 4GB container)
+
+- **Solution**:
+  - Added `close()` method to `N8NDocumentationMCPServer` that:
+    - Calls `server.close()` (MCP SDK cleanup)
+    - Calls `cache.destroy()` to stop cleanup timer and clear entries
+    - Closes database connection properly
+    - Nullifies service references to help GC
+  - Updated `removeSession()` to call `server.close()` before releasing references
+
+- **Files Changed**:
+  - `src/mcp/server.ts` - Added `close()` method
+  - `src/http-server-single-session.ts` - Call `server.close()` in `removeSession()`
+
+**Conceived by Romuald Członkowski - [AiAdvisors](https://www.aiadvisors.pl/en)**
+
+## [2.28.6] - 2025-12-05
+
+### Bug Fixes
+
+**Test Updates for v2.28.5 Behavior Changes**
+
+Fixed test expectations to match v2.28.5 implementation changes:
+
+- **n8n-version tests**: Updated to verify 'v' prefix support in version strings (e.g., `v1.2.3`)
+- **n8n-validation tests**: Updated expectations for empty settings handling - now returns minimal defaults `{ executionOrder: 'v1' }` instead of `{}` to avoid n8n API rejection (Issue #431)
+
+**Conceived by Romuald Członkowski - [AiAdvisors](https://www.aiadvisors.pl/en)**
+
+## [2.28.5] - 2025-12-05
+
+### Bug Fixes
+
+**Version-Aware Settings Filtering for n8n API Compatibility (#464, #465, #466)**
+
+Fixed `"Invalid request: request/body must NOT have additional properties"` errors when using `n8n_update_partial_workflow` with older n8n instances.
+
+- **Root Cause**: n8n Public API uses strict JSON schema validation. Different n8n versions support different workflow settings properties:
+  - All versions: 7 core properties (saveExecutionProgress, saveManualExecutions, saveDataErrorExecution, saveDataSuccessExecution, executionTimeout, errorWorkflow, timezone)
+  - n8n 1.37.0+: adds `executionOrder`
+  - n8n 1.119.0+: adds `callerPolicy`, `callerIds`, `timeSavedPerExecution`, `availableInMCP`
+
+- **Solution**: Auto-detect n8n version via `/rest/settings` endpoint and filter settings accordingly
+
+- **New Features**:
+  - Version detection with 5-minute cache TTL (handles server upgrades without restart)
+  - Type validation for version string responses
+  - Support for `v` prefix in version strings (e.g., `v1.2.3`)
+  - Race condition protection with promise-based locking
+  - Read-only field filtering (`activeVersionId`, `activeVersion`)
+
+- **Files Changed**:
+  - `src/services/n8n-version.ts` (NEW) - Version detection and settings filtering
+  - `src/services/n8n-api-client.ts` - Added `getVersion()` method with locking
+  - `src/services/n8n-validation.ts` - Added read-only field filtering
+  - `src/types/n8n-api.ts` - Added version types
+  - `tests/unit/services/n8n-version.test.ts` (NEW) - 24 unit tests
+
+Thanks to [@thesved](https://github.com/thesved) for this contribution!
+
+**Conceived by Romuald Członkowski - [AiAdvisors](https://www.aiadvisors.pl/en)**
+
+## [2.28.4] - 2025-12-05
+
+### Features
+
+**Configurable MAX_SESSIONS Limit (#468)**
+
+The `MAX_SESSIONS` limit is now configurable via the `N8N_MCP_MAX_SESSIONS` environment variable, addressing scalability issues for multi-tenant SaaS deployments.
+
+- **Problem**: Hardcoded limit of 100 concurrent sessions caused "Session limit reached" errors during peak usage
+- **Solution**: `MAX_SESSIONS` now reads from `N8N_MCP_MAX_SESSIONS` env var (default: 100)
+- **Usage**: Set `N8N_MCP_MAX_SESSIONS=1000` for higher capacity deployments
+- **Safety**: Includes `Math.max(1, ...)` floor to prevent invalid configurations
+- **Files**: `src/http-server-single-session.ts:44`
+
+```bash
+# Example: Allow up to 1000 concurrent sessions
+N8N_MCP_MAX_SESSIONS=1000
+```
+
 ## [2.28.3] - 2025-12-02
 
 ### Changed
@@ -596,7 +701,7 @@ Added export/restore functionality for MCP sessions to enable zero-downtime depl
 - `restoreSessionState(sessions)` method for session recovery
 - Validates session structure using existing `validateInstanceContext()`
 - Handles null/invalid sessions gracefully with warnings
-- Enforces MAX_SESSIONS limit (100 concurrent sessions)
+- Enforces MAX_SESSIONS limit (default 100, configurable via N8N_MCP_MAX_SESSIONS env var)
 - Skips expired sessions during restore
 
 **3. SessionState Type**
