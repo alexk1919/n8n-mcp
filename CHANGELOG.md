@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.29.0] - 2025-12-09
+
+### Performance
+
+**Token-Efficient Workflow Tool Responses (#479)**
+
+Optimized 4 workflow management tools to return minimal responses instead of full workflow objects, reducing token usage by 75-90%:
+
+- **n8n_update_partial_workflow**: Returns `{id, name, active, nodeCount, operationsApplied}` instead of full workflow
+- **n8n_create_workflow**: Returns `{id, name, active, nodeCount}` instead of full workflow
+- **n8n_update_full_workflow**: Returns `{id, name, active, nodeCount}` instead of full workflow
+- **n8n_delete_workflow**: Returns `{id, name, deleted: true}` instead of full deleted workflow
+
+**Impact**:
+- ~75-90% reduction in response token usage per operation
+- Messages now guide AI agents to use `n8n_get_workflow` with mode 'structure' if verification needed
+- No functional changes - full workflow data still available via `n8n_get_workflow`
+
+**Files Modified**:
+- `src/mcp/handlers-workflow-diff.ts` - Optimized partial update response
+- `src/mcp/handlers-n8n-manager.ts` - Optimized create, full update, and delete responses
+- `src/mcp/tool-docs/workflow_management/*.ts` - Updated documentation
+
+**Conceived by Romuald Członkowski - [AiAdvisors](https://www.aiadvisors.pl/en)**
+
+## [2.28.9] - 2025-12-08
+
+### Dependencies
+
+**Updated n8n to 1.123.4**
+
+- Updated n8n from 1.122.4 to 1.123.4
+- Updated n8n-core from 1.121.1 to 1.122.1
+- Updated n8n-workflow from 1.119.1 to 1.120.0
+- Updated @n8n/n8n-nodes-langchain from 1.121.1 to 1.122.1
+- Rebuilt node database with 545 nodes (439 from n8n-nodes-base, 106 from @n8n/n8n-nodes-langchain)
+- Updated README badge with new n8n version
+
+**Conceived by Romuald Członkowski - [AiAdvisors](https://www.aiadvisors.pl/en)**
+
 ## [2.28.8] - 2025-12-07
 
 ### Bug Fixes
