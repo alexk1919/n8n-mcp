@@ -7,6 +7,142 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.31.3] - 2025-12-26
+
+### Fixed
+
+**Documentation Bug: Connection Keys Say "Node IDs" but Require "Node Names" (Issue #510)**
+
+Fixed documentation that incorrectly stated connection keys should be "node IDs" when n8n actually requires "node names".
+
+**Problem:**
+The `n8n_create_workflow` documentation and examples showed using node IDs (e.g., `"webhook_1"`) as connection keys, but the validator requires node names (e.g., `"Webhook"`). This caused workflow creation failures and contributed to low success rates for AI-generated workflows.
+
+**Changes:**
+- Updated `tools-n8n-manager.ts` parameter description: "Keys are source node names (the name field, not id)"
+- Updated `n8n-create-workflow.ts` documentation: "Keys are source node names (not IDs)"
+- Fixed example to use `"Webhook"` and `"Slack"` instead of `"webhook_1"` and `"slack_1"`
+- Clarified `get-template.ts` return description
+
+**Before (incorrect):**
+```javascript
+connections: {
+  "webhook_1": { "main": [[{node: "slack_1", ...}]] }  // WRONG
+}
+```
+
+**After (correct):**
+```javascript
+connections: {
+  "Webhook": { "main": [[{node: "Slack", ...}]] }  // CORRECT
+}
+```
+
+**Impact:**
+- AI models following documentation will now generate valid workflows
+- Clear distinction between node `id` (internal identifier) and `name` (connection key)
+- No breaking changes - validator behavior unchanged
+
+## [2.31.2] - 2025-12-24
+
+### Changed
+
+- Updated n8n from 2.0.2 to 2.1.4
+- Updated n8n-core from 2.0.1 to 2.1.3
+- Updated n8n-workflow from 2.0.1 to 2.1.1
+- Updated @n8n/n8n-nodes-langchain from 2.0.1 to 2.1.3
+- Rebuilt node database with 540 nodes (434 from n8n-nodes-base, 106 from @n8n/n8n-nodes-langchain)
+- Refreshed template database with 2,737 workflow templates from n8n.io
+
+## [2.31.1] - 2025-12-23
+
+### Fixed
+
+**mcpTrigger Nodes No Longer Incorrectly Flagged as "Disconnected" (Issue #503)**
+
+Fixed a validation bug where `mcpTrigger` nodes were incorrectly flagged as "disconnected nodes" when using `n8n_update_partial_workflow` or `n8n_update_full_workflow`. This blocked ALL updates to MCP server workflows.
+
+**Root Cause:**
+The `validateWorkflowStructure()` function only checked `main` connections when building the connected nodes set, ignoring AI connection types (`ai_tool`, `ai_languageModel`, `ai_memory`, `ai_embedding`, `ai_vectorStore`). Additionally, trigger nodes were only checked for outgoing connections, but `mcpTrigger` only receives inbound `ai_tool` connections.
+
+**Changes:**
+- Extended connection validation to check all 7 connection types (main, error, ai_tool, ai_languageModel, ai_memory, ai_embedding, ai_vectorStore)
+- Updated trigger node validation to accept either outgoing OR inbound connections
+- Added 7 new tests covering all AI connection types
+
+**Impact:**
+- MCP server workflows can now be updated, renamed, and deactivated normally
+- All `n8n_update_*` operations work correctly for AI workflows
+- No breaking changes for existing workflows
+
+## [2.31.0] - 2025-12-23
+
+### Added
+
+**New `error` Mode for Execution Debugging**
+
+Added a new `mode='error'` option to `n8n_executions` action=get that's optimized for AI agents debugging workflow failures. This mode provides intelligent error extraction with 80-99% token savings compared to `mode='full'`.
+
+**Key Features:**
+
+- **Error Analysis**: Extracts error message, type, node name, and relevant parameters
+- **Upstream Context**: Samples input data from the node feeding into the error node (configurable limit)
+- **Execution Path**: Shows the node execution sequence from trigger to error
+- **AI Suggestions**: Pattern-based fix suggestions for common errors (missing fields, auth issues, rate limits, etc.)
+- **Workflow Fetch**: Optionally fetches workflow structure for accurate upstream detection
+
+**New Parameters for `mode='error'`:**
+
+- `errorItemsLimit` (default: 2) - Number of sample items from upstream node
+- `includeStackTrace` (default: false) - Include full vs truncated stack trace
+- `includeExecutionPath` (default: true) - Include node execution path
+- `fetchWorkflow` (default: true) - Fetch workflow for accurate upstream detection
+
+**Token Efficiency:**
+
+| Execution Size | Full Mode | Error Mode | Savings |
+|----------------|-----------|------------|---------|
+| 11 items | ~11KB | ~3KB | 73% |
+| 1001 items | ~354KB | ~3KB | 99% |
+
+**AI Suggestion Patterns Detected:**
+
+- Missing required fields
+- Authentication/authorization issues
+- Rate limiting
+- Network/connection errors
+- Invalid JSON format
+- Missing data fields
+- Type mismatches
+- Timeouts
+- Permission denied
+
+**Usage Examples:**
+
+```javascript
+// Basic error debugging
+n8n_executions({action: "get", id: "exec_123", mode: "error"})
+
+// With more sample data
+n8n_executions({action: "get", id: "exec_123", mode: "error", errorItemsLimit: 5})
+
+// With full stack trace
+n8n_executions({action: "get", id: "exec_123", mode: "error", includeStackTrace: true})
+```
+
+## [2.30.2] - 2025-12-21
+
+### Fixed
+
+**Restored Template Database**
+
+Fixed missing templates in the database by restoring 2,768 workflow templates from git history while preserving compatibility with latest n8n 2.0.2 node definitions.
+
+**Key Changes:**
+- Restored templates table with 2,768 curated workflow templates
+- Updated nodes table schema to include `is_tool_variant`, `has_tool_variant`, and `tool_variant_of` columns
+- Database now contains 803 nodes (updated for n8n 2.0.2) and 2,768 templates
+
 ## [2.30.1] - 2025-12-17
 
 ### Added
