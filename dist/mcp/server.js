@@ -43,12 +43,14 @@ const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
 const fs_1 = require("fs");
 const path_1 = __importDefault(require("path"));
 const tools_1 = require("./tools");
+const ui_1 = require("./ui");
 const tools_n8n_manager_1 = require("./tools-n8n-manager");
 const tools_n8n_friendly_1 = require("./tools-n8n-friendly");
 const workflow_examples_1 = require("./workflow-examples");
 const logger_1 = require("../utils/logger");
 const node_repository_1 = require("../database/node-repository");
 const database_adapter_1 = require("../database/database-adapter");
+const shared_database_1 = require("../database/shared-database");
 const property_filter_1 = require("../services/property-filter");
 const task_templates_1 = require("../services/task-templates");
 const config_validator_1 = require("../services/config-validator");
@@ -80,6 +82,9 @@ class N8NDocumentationMCPServer {
         this.previousToolTimestamp = Date.now();
         this.earlyLogger = null;
         this.disabledToolsCache = null;
+        this.useSharedDatabase = false;
+        this.sharedDbState = null;
+        this.isShutdown = false;
         this.dbHealthChecked = false;
         this.instanceContext = instanceContext;
         this.earlyLogger = earlyLogger || null;
@@ -144,15 +149,29 @@ class N8NDocumentationMCPServer {
         }, {
             capabilities: {
                 tools: {},
+                resources: {},
             },
         });
+        ui_1.UIAppRegistry.load();
         this.setupHandlers();
     }
     async close() {
         try {
+            await this.initialized;
+        }
+        catch (error) {
+            logger_1.logger.debug('Initialization had failed, proceeding with cleanup', {
+                error: error instanceof Error ? error.message : String(error)
+            });
+        }
+        try {
             await this.server.close();
             this.cache.destroy();
-            if (this.db) {
+            if (this.useSharedDatabase && this.sharedDbState) {
+                (0, shared_database_1.releaseSharedDatabase)(this.sharedDbState);
+                logger_1.logger.debug('Released shared database reference');
+            }
+            else if (this.db) {
                 try {
                     this.db.close();
                 }
@@ -166,6 +185,7 @@ class N8NDocumentationMCPServer {
             this.repository = null;
             this.templateService = null;
             this.earlyLogger = null;
+            this.sharedDbState = null;
         }
         catch (error) {
             logger_1.logger.warn('Error closing MCP server', { error: error instanceof Error ? error.message : String(error) });
@@ -177,17 +197,27 @@ class N8NDocumentationMCPServer {
                 this.earlyLogger.logCheckpoint(startup_checkpoints_1.STARTUP_CHECKPOINTS.DATABASE_CONNECTING);
             }
             logger_1.logger.debug('Database initialization starting...', { dbPath });
-            this.db = await (0, database_adapter_1.createDatabaseAdapter)(dbPath);
-            logger_1.logger.debug('Database adapter created');
             if (dbPath === ':memory:') {
+                this.db = await (0, database_adapter_1.createDatabaseAdapter)(dbPath);
+                logger_1.logger.debug('Database adapter created (in-memory mode)');
                 await this.initializeInMemorySchema();
                 logger_1.logger.debug('In-memory schema initialized');
+                this.repository = new node_repository_1.NodeRepository(this.db);
+                this.templateService = new template_service_1.TemplateService(this.db);
+                enhanced_config_validator_1.EnhancedConfigValidator.initializeSimilarityServices(this.repository);
+                this.useSharedDatabase = false;
             }
-            this.repository = new node_repository_1.NodeRepository(this.db);
+            else {
+                const sharedState = await (0, shared_database_1.getSharedDatabase)(dbPath);
+                this.db = sharedState.db;
+                this.repository = sharedState.repository;
+                this.templateService = sharedState.templateService;
+                this.sharedDbState = sharedState;
+                this.useSharedDatabase = true;
+                logger_1.logger.debug('Using shared database connection');
+            }
             logger_1.logger.debug('Node repository initialized');
-            this.templateService = new template_service_1.TemplateService(this.db);
             logger_1.logger.debug('Template service initialized');
-            enhanced_config_validator_1.EnhancedConfigValidator.initializeSimilarityServices(this.repository);
             logger_1.logger.debug('Similarity services initialized');
             if (this.earlyLogger) {
                 this.earlyLogger.logCheckpoint(startup_checkpoints_1.STARTUP_CHECKPOINTS.DATABASE_CONNECTED);
@@ -341,6 +371,7 @@ class N8NDocumentationMCPServer {
                 protocolVersion: negotiationResult.version,
                 capabilities: {
                     tools: {},
+                    resources: {},
                 },
                 serverInfo: {
                     name: 'n8n-documentation-mcp',
@@ -396,6 +427,7 @@ class N8NDocumentationMCPServer {
                     description: tool.description
                 });
             });
+            ui_1.UIAppRegistry.injectToolMeta(tools);
             return { tools };
         });
         this.server.setRequestHandler(types_js_1.CallToolRequestSchema, async (request) => {
@@ -534,6 +566,39 @@ class N8NDocumentationMCPServer {
                     isError: true,
                 };
             }
+        });
+        this.server.setRequestHandler(types_js_1.ListResourcesRequestSchema, async () => {
+            const apps = ui_1.UIAppRegistry.getAllApps();
+            return {
+                resources: apps
+                    .filter(app => app.html !== null)
+                    .map(app => ({
+                    uri: app.config.uri,
+                    name: app.config.displayName,
+                    description: app.config.description,
+                    mimeType: app.config.mimeType,
+                })),
+            };
+        });
+        this.server.setRequestHandler(types_js_1.ReadResourceRequestSchema, async (request) => {
+            const uri = request.params.uri;
+            const match = uri.match(/^ui:\/\/n8n-mcp\/(.+)$/);
+            if (!match) {
+                throw new Error(`Unknown resource URI: ${uri}`);
+            }
+            const app = ui_1.UIAppRegistry.getAppById(match[1]);
+            if (!app || !app.html) {
+                throw new Error(`UI app not found or not built: ${match[1]}`);
+            }
+            return {
+                contents: [
+                    {
+                        uri: app.config.uri,
+                        mimeType: app.config.mimeType,
+                        text: app.html,
+                    },
+                ],
+            };
         });
     }
     sanitizeValidationResult(result, toolName) {
@@ -2889,7 +2954,26 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         process.stdin.resume();
     }
     async shutdown() {
+        if (this.isShutdown) {
+            logger_1.logger.debug('Shutdown already called, skipping');
+            return;
+        }
+        this.isShutdown = true;
         logger_1.logger.info('Shutting down MCP server...');
+        try {
+            await this.initialized;
+        }
+        catch (error) {
+            logger_1.logger.debug('Initialization had failed, proceeding with cleanup', {
+                error: error instanceof Error ? error.message : String(error)
+            });
+        }
+        try {
+            await this.server.close();
+        }
+        catch (error) {
+            logger_1.logger.error('Error closing MCP server:', error);
+        }
         if (this.cache) {
             try {
                 this.cache.destroy();
@@ -2899,15 +2983,29 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
                 logger_1.logger.error('Error cleaning up cache:', error);
             }
         }
-        if (this.db) {
+        if (this.useSharedDatabase && this.sharedDbState) {
             try {
-                await this.db.close();
+                (0, shared_database_1.releaseSharedDatabase)(this.sharedDbState);
+                logger_1.logger.info('Released shared database reference');
+            }
+            catch (error) {
+                logger_1.logger.error('Error releasing shared database:', error);
+            }
+        }
+        else if (this.db) {
+            try {
+                this.db.close();
                 logger_1.logger.info('Database connection closed');
             }
             catch (error) {
                 logger_1.logger.error('Error closing database:', error);
             }
         }
+        this.db = null;
+        this.repository = null;
+        this.templateService = null;
+        this.earlyLogger = null;
+        this.sharedDbState = null;
     }
 }
 exports.N8NDocumentationMCPServer = N8NDocumentationMCPServer;
