@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { z } from 'zod';
 import { WorkflowNode, WorkflowConnection, Workflow } from '../types/n8n-api';
 import { isTriggerNode, isActivatableTrigger } from '../utils/node-type-utils';
@@ -87,6 +88,22 @@ export function validateWorkflowSettings(settings: unknown): z.infer<typeof work
   return workflowSettingsSchema.parse(settings);
 }
 
+const WEBHOOK_NODE_TYPES = new Set([
+  'n8n-nodes-base.webhook',
+  'n8n-nodes-base.webhookTrigger',
+  'n8n-nodes-base.formTrigger',
+  '@n8n/n8n-nodes-langchain.chatTrigger',
+]);
+
+function ensureWebhookIds(nodes?: WorkflowNode[]): void {
+  if (!nodes) return;
+  for (const node of nodes) {
+    if (WEBHOOK_NODE_TYPES.has(node.type) && !node.webhookId) {
+      node.webhookId = crypto.randomUUID();
+    }
+  }
+}
+
 // Clean workflow data for API operations
 export function cleanWorkflowForCreate(workflow: Partial<Workflow>): Partial<Workflow> {
   const {
@@ -108,6 +125,8 @@ export function cleanWorkflowForCreate(workflow: Partial<Workflow>): Partial<Wor
   if (!cleanedWorkflow.settings || Object.keys(cleanedWorkflow.settings).length === 0) {
     cleanedWorkflow.settings = defaultWorkflowSettings;
   }
+
+  ensureWebhookIds(cleanedWorkflow.nodes);
 
   return cleanedWorkflow;
 }
@@ -193,6 +212,8 @@ export function cleanWorkflowForUpdate(workflow: Workflow): Partial<Workflow> {
     // No settings provided - use minimal valid defaults
     cleanedWorkflow.settings = { executionOrder: 'v1' as const };
   }
+
+  ensureWebhookIds(cleanedWorkflow.nodes);
 
   return cleanedWorkflow;
 }
@@ -600,13 +621,13 @@ export function validateOperatorStructure(operator: any, path: string): string[]
   if (!operator.operation) {
     errors.push(
       `${path}: missing required field "operation". ` +
-      'Operation specifies the comparison type (e.g., "equals", "contains", "isNotEmpty")'
+      'Operation specifies the comparison type (e.g., "equals", "contains", "notEmpty")'
     );
   }
 
   // Check singleValue based on operator type
   if (operator.operation) {
-    const unaryOperators = ['isEmpty', 'isNotEmpty', 'true', 'false', 'isNumeric'];
+    const unaryOperators = ['empty', 'notEmpty', 'true', 'false', 'isNumeric', 'exists', 'notExists'];
     const isUnary = unaryOperators.includes(operator.operation);
 
     if (isUnary) {
@@ -622,7 +643,7 @@ export function validateOperatorStructure(operator: any, path: string): string[]
       if (operator.singleValue === true) {
         errors.push(
           `${path}: binary operator "${operator.operation}" should not have "singleValue: true". ` +
-          'Only unary operators (isEmpty, isNotEmpty, true, false, isNumeric) need this property.'
+          'Only unary operators (empty, notEmpty, true, false, isNumeric, exists, notExists) need this property.'
         );
       }
     }

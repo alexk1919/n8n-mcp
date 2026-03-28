@@ -23,6 +23,7 @@ class WorkflowDiffEngine {
             this.removedNodeNames.clear();
             this.tagsToAdd = [];
             this.tagsToRemove = [];
+            this.transferToProjectId = undefined;
             const workflowCopy = JSON.parse(JSON.stringify(workflow));
             const nodeOperationTypes = ['addNode', 'removeNode', 'updateNode', 'moveNode', 'enableNode', 'disableNode'];
             const nodeOperations = [];
@@ -81,6 +82,10 @@ class WorkflowDiffEngine {
                         failed: failedIndices
                     };
                 }
+                const shouldActivate = workflowCopy._shouldActivate === true;
+                const shouldDeactivate = workflowCopy._shouldDeactivate === true;
+                delete workflowCopy._shouldActivate;
+                delete workflowCopy._shouldDeactivate;
                 const success = appliedIndices.length > 0;
                 return {
                     success,
@@ -91,8 +96,11 @@ class WorkflowDiffEngine {
                     warnings: this.warnings.length > 0 ? this.warnings : undefined,
                     applied: appliedIndices,
                     failed: failedIndices,
+                    shouldActivate: shouldActivate || undefined,
+                    shouldDeactivate: shouldDeactivate || undefined,
                     tagsToAdd: this.tagsToAdd.length > 0 ? this.tagsToAdd : undefined,
-                    tagsToRemove: this.tagsToRemove.length > 0 ? this.tagsToRemove : undefined
+                    tagsToRemove: this.tagsToRemove.length > 0 ? this.tagsToRemove : undefined,
+                    transferToProjectId: this.transferToProjectId || undefined
                 };
             }
             else {
@@ -181,7 +189,8 @@ class WorkflowDiffEngine {
                     shouldActivate: shouldActivate || undefined,
                     shouldDeactivate: shouldDeactivate || undefined,
                     tagsToAdd: this.tagsToAdd.length > 0 ? this.tagsToAdd : undefined,
-                    tagsToRemove: this.tagsToRemove.length > 0 ? this.tagsToRemove : undefined
+                    tagsToRemove: this.tagsToRemove.length > 0 ? this.tagsToRemove : undefined,
+                    transferToProjectId: this.transferToProjectId || undefined
                 };
             }
         }
@@ -220,6 +229,8 @@ class WorkflowDiffEngine {
             case 'addTag':
             case 'removeTag':
                 return null;
+            case 'transferWorkflow':
+                return this.validateTransferWorkflow(workflow, operation);
             case 'activateWorkflow':
                 return this.validateActivateWorkflow(workflow, operation);
             case 'deactivateWorkflow':
@@ -285,6 +296,9 @@ class WorkflowDiffEngine {
             case 'replaceConnections':
                 this.applyReplaceConnections(workflow, operation);
                 break;
+            case 'transferWorkflow':
+                this.applyTransferWorkflow(workflow, operation);
+                break;
         }
     }
     validateAddNode(workflow, operation) {
@@ -334,6 +348,28 @@ class WorkflowDiffEngine {
                 const collision = workflow.nodes.find(n => n.id !== node.id && this.normalizeNodeName(n.name) === normalizedNewName);
                 if (collision) {
                     return `Cannot rename node "${node.name}" to "${operation.updates.name}": A node with that name already exists (id: ${collision.id.substring(0, 8)}...). Please choose a different name.`;
+                }
+            }
+        }
+        for (const [path, value] of Object.entries(operation.updates)) {
+            if (value !== null && typeof value === 'object' && !Array.isArray(value)
+                && '__patch_find_replace' in value) {
+                const patches = value.__patch_find_replace;
+                if (!Array.isArray(patches)) {
+                    return `Invalid __patch_find_replace at "${path}": must be an array of {find, replace} objects`;
+                }
+                for (let i = 0; i < patches.length; i++) {
+                    const patch = patches[i];
+                    if (!patch || typeof patch.find !== 'string' || typeof patch.replace !== 'string') {
+                        return `Invalid __patch_find_replace entry at "${path}[${i}]": each entry must have "find" (string) and "replace" (string)`;
+                    }
+                }
+                const currentValue = this.getNestedProperty(node, path);
+                if (currentValue === undefined) {
+                    return `Cannot apply __patch_find_replace to "${path}": property does not exist on node`;
+                }
+                if (typeof currentValue !== 'string') {
+                    return `Cannot apply __patch_find_replace to "${path}": current value is ${typeof currentValue}, expected string`;
                 }
             }
         }
@@ -527,7 +563,25 @@ class WorkflowDiffEngine {
             logger.debug(`Tracking rename: "${oldName}" → "${newName}"`);
         }
         Object.entries(operation.updates).forEach(([path, value]) => {
-            this.setNestedProperty(node, path, value);
+            if (value !== null && typeof value === 'object' && !Array.isArray(value)
+                && '__patch_find_replace' in value) {
+                const patches = value.__patch_find_replace;
+                let current = this.getNestedProperty(node, path);
+                for (const patch of patches) {
+                    if (!current.includes(patch.find)) {
+                        this.warnings.push({
+                            operation: -1,
+                            message: `__patch_find_replace: "${patch.find.substring(0, 50)}" not found in "${path}". Skipped.`
+                        });
+                        continue;
+                    }
+                    current = current.replace(patch.find, patch.replace);
+                }
+                this.setNestedProperty(node, path, current);
+            }
+            else {
+                this.setNestedProperty(node, path, value);
+            }
         });
         const sanitized = (0, node_sanitizer_1.sanitizeNode)(node);
         Object.assign(node, sanitized);
@@ -554,9 +608,11 @@ class WorkflowDiffEngine {
         const sourceNode = this.findNode(workflow, operation.source, operation.source);
         let sourceOutput = String(operation.sourceOutput ?? 'main');
         let sourceIndex = operation.sourceIndex ?? 0;
-        if (/^\d+$/.test(sourceOutput) && operation.sourceIndex === undefined
+        const numericOutput = /^\d+$/.test(sourceOutput) ? parseInt(sourceOutput, 10) : null;
+        if (numericOutput !== null
+            && (operation.sourceIndex === undefined || operation.sourceIndex === numericOutput)
             && operation.branch === undefined && operation.case === undefined) {
-            sourceIndex = parseInt(sourceOutput, 10);
+            sourceIndex = numericOutput;
             sourceOutput = 'main';
         }
         if (operation.branch !== undefined && operation.sourceIndex === undefined) {
@@ -592,7 +648,10 @@ class WorkflowDiffEngine {
         if (!sourceNode || !targetNode)
             return;
         const { sourceOutput, sourceIndex } = this.resolveSmartParameters(workflow, operation);
-        const targetInput = String(operation.targetInput ?? sourceOutput);
+        let targetInput = String(operation.targetInput ?? sourceOutput);
+        if (/^\d+$/.test(targetInput)) {
+            targetInput = 'main';
+        }
         const targetIndex = operation.targetIndex ?? 0;
         if (!workflow.connections[sourceNode.name]) {
             workflow.connections[sourceNode.name] = {};
@@ -698,6 +757,15 @@ class WorkflowDiffEngine {
     }
     applyDeactivateWorkflow(workflow, operation) {
         workflow._shouldDeactivate = true;
+    }
+    validateTransferWorkflow(_workflow, operation) {
+        if (!operation.destinationProjectId) {
+            return 'transferWorkflow requires a non-empty destinationProjectId string';
+        }
+        return null;
+    }
+    applyTransferWorkflow(_workflow, operation) {
+        this.transferToProjectId = operation.destinationProjectId;
     }
     validateCleanStaleConnections(workflow, operation) {
         return null;
@@ -806,9 +874,10 @@ class WorkflowDiffEngine {
                     for (let connIndex = 0; connIndex < connectionsAtIndex.length; connIndex++) {
                         const connection = connectionsAtIndex[connIndex];
                         if (renames.has(connection.node)) {
+                            const oldTargetName = connection.node;
                             const newTargetName = renames.get(connection.node);
                             connection.node = newTargetName;
-                            logger.debug(`Updated connection: ${sourceName}[${outputType}][${outputIndex}][${connIndex}].node: "${connection.node}" → "${newTargetName}"`);
+                            logger.debug(`Updated connection: ${sourceName}[${outputType}][${outputIndex}][${connIndex}].node: "${oldTargetName}" → "${newTargetName}"`);
                         }
                     }
                 }
@@ -850,6 +919,16 @@ class WorkflowDiffEngine {
             .map(n => `"${n.name}" (id: ${n.id.substring(0, 8)}...)`)
             .join(', ');
         return `Node not found for ${operationType}: "${nodeIdentifier}". Available nodes: ${availableNodes}. Tip: Use node ID for names with special characters (apostrophes, quotes).`;
+    }
+    getNestedProperty(obj, path) {
+        const keys = path.split('.');
+        let current = obj;
+        for (const key of keys) {
+            if (current == null || typeof current !== 'object')
+                return undefined;
+            current = current[key];
+        }
+        return current;
     }
     setNestedProperty(obj, path, value) {
         const keys = path.split('.');

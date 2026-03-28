@@ -219,6 +219,7 @@ describe('HTTP Server Session Management', () => {
       status: vi.fn().mockReturnThis(),
       json: vi.fn().mockReturnThis(),
       send: vi.fn().mockReturnThis(),
+      end: vi.fn().mockReturnThis(),
       setHeader: vi.fn((key: string, value: string) => {
         headers[key.toLowerCase()] = value;
       }),
@@ -333,14 +334,14 @@ describe('HTTP Server Session Management', () => {
       server = new SingleSessionHTTPServer();
       
       // Mock expired sessions
-      // Note: Default session timeout is 5 minutes (configurable via SESSION_TIMEOUT_MINUTES)
+      // Note: Default session timeout is 30 minutes (configurable via SESSION_TIMEOUT_MINUTES)
       const mockSessionMetadata = {
         'session-1': {
-          lastAccess: new Date(Date.now() - 10 * 60 * 1000), // 10 minutes ago (expired with 5 min timeout)
+          lastAccess: new Date(Date.now() - 45 * 60 * 1000), // 45 minutes ago (expired with 30 min timeout)
           createdAt: new Date(Date.now() - 60 * 60 * 1000)
         },
         'session-2': {
-          lastAccess: new Date(Date.now() - 2 * 60 * 1000), // 2 minutes ago (not expired with 5 min timeout)
+          lastAccess: new Date(Date.now() - 10 * 60 * 1000), // 10 minutes ago (not expired with 30 min timeout)
           createdAt: new Date(Date.now() - 20 * 60 * 1000)
         }
       };
@@ -516,15 +517,15 @@ describe('HTTP Server Session Management', () => {
     it('should get session metrics correctly', async () => {
       server = new SingleSessionHTTPServer();
 
-      // Note: Default session timeout is 5 minutes (configurable via SESSION_TIMEOUT_MINUTES)
+      // Note: Default session timeout is 30 minutes (configurable via SESSION_TIMEOUT_MINUTES)
       const now = Date.now();
       (server as any).sessionMetadata = {
         'active-session': {
-          lastAccess: new Date(now - 2 * 60 * 1000), // 2 minutes ago (not expired with 5 min timeout)
+          lastAccess: new Date(now - 10 * 60 * 1000), // 10 minutes ago (not expired with 30 min timeout)
           createdAt: new Date(now - 20 * 60 * 1000)
         },
         'expired-session': {
-          lastAccess: new Date(now - 10 * 60 * 1000), // 10 minutes ago (expired with 5 min timeout)
+          lastAccess: new Date(now - 45 * 60 * 1000), // 45 minutes ago (expired with 30 min timeout)
           createdAt: new Date(now - 60 * 60 * 1000)
         }
       };
@@ -1170,7 +1171,7 @@ describe('HTTP Server Session Management', () => {
 
     it('should show legacy SSE session when present', async () => {
       server = new SingleSessionHTTPServer();
-      
+
       // Mock legacy session
       const mockSession = {
         sessionId: 'sse-session-123',
@@ -1180,10 +1181,127 @@ describe('HTTP Server Session Management', () => {
       (server as any).session = mockSession;
 
       const sessionInfo = server.getSessionInfo();
-      
+
       expect(sessionInfo.active).toBe(true);
       expect(sessionInfo.sessionId).toBe('sse-session-123');
       expect(sessionInfo.age).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  describe('Notification handling for stale sessions (#654)', () => {
+    beforeEach(() => {
+      // Re-apply mockImplementation after vi.clearAllMocks() resets it
+      mockConsoleManager.wrapOperation.mockImplementation(async (fn: () => Promise<any>) => {
+        return await fn();
+      });
+    });
+
+    it('should return 202 for notification with stale session ID', async () => {
+      server = new SingleSessionHTTPServer();
+
+      const { req, res } = createMockReqRes();
+
+      req.headers = { 'mcp-session-id': 'stale-session-that-does-not-exist' };
+      req.method = 'POST';
+      req.body = {
+        jsonrpc: '2.0',
+        method: 'notifications/initialized',
+      };
+
+      await server.handleRequest(req as any, res as any);
+
+      expect(res.status).toHaveBeenCalledWith(202);
+      expect(res.end).toHaveBeenCalled();
+    });
+
+    it('should return 202 for notification batch with stale session ID', async () => {
+      server = new SingleSessionHTTPServer();
+
+      const { req, res } = createMockReqRes();
+
+      req.headers = { 'mcp-session-id': 'stale-session-that-does-not-exist' };
+      req.method = 'POST';
+      req.body = [
+        { jsonrpc: '2.0', method: 'notifications/initialized' },
+        { jsonrpc: '2.0', method: 'notifications/cancelled' },
+      ];
+
+      await server.handleRequest(req as any, res as any);
+
+      expect(res.status).toHaveBeenCalledWith(202);
+      expect(res.end).toHaveBeenCalled();
+    });
+
+    it('should return 400 for request (with id) with stale session ID', async () => {
+      server = new SingleSessionHTTPServer();
+
+      const { req, res } = createMockReqRes();
+      req.headers = { 'mcp-session-id': 'stale-session-that-does-not-exist' };
+      req.method = 'POST';
+      req.body = {
+        jsonrpc: '2.0',
+        method: 'tools/call',
+        params: { name: 'search_nodes', arguments: { query: 'http' } },
+        id: 42,
+      };
+
+      await server.handleRequest(req as any, res as any);
+
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+        error: expect.objectContaining({
+          message: 'Bad Request: Session not found or expired',
+        }),
+      }));
+    });
+
+    it('should return 202 for notification with no session ID', async () => {
+      server = new SingleSessionHTTPServer();
+
+      const { req, res } = createMockReqRes();
+
+      req.method = 'POST';
+      req.body = {
+        jsonrpc: '2.0',
+        method: 'notifications/cancelled',
+      };
+
+      await server.handleRequest(req as any, res as any);
+
+      expect(res.status).toHaveBeenCalledWith(202);
+      expect(res.end).toHaveBeenCalled();
+    });
+
+    it('should return 400 for request with no session ID and not initialize', async () => {
+      server = new SingleSessionHTTPServer();
+
+      const { req, res } = createMockReqRes();
+      req.method = 'POST';
+      req.body = {
+        jsonrpc: '2.0',
+        method: 'tools/list',
+        id: 1,
+      };
+
+      await server.handleRequest(req as any, res as any);
+
+      expect(res.status).toHaveBeenCalledWith(400);
+    });
+
+    it('should return 400 for mixed batch (notification + request) with stale session', async () => {
+      server = new SingleSessionHTTPServer();
+
+      const { req, res } = createMockReqRes();
+      req.headers = { 'mcp-session-id': 'stale-session-that-does-not-exist' };
+      req.method = 'POST';
+      req.body = [
+        { jsonrpc: '2.0', method: 'notifications/initialized' },
+        { jsonrpc: '2.0', method: 'tools/list', id: 1 },
+      ];
+
+      await server.handleRequest(req as any, res as any);
+
+      expect(res.status).toHaveBeenCalledWith(400);
     });
   });
 });

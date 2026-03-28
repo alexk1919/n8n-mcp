@@ -28,7 +28,8 @@ import {
   ActivateWorkflowOperation,
   DeactivateWorkflowOperation,
   CleanStaleConnectionsOperation,
-  ReplaceConnectionsOperation
+  ReplaceConnectionsOperation,
+  TransferWorkflowOperation
 } from '../types/workflow-diff';
 import { Workflow, WorkflowNode, WorkflowConnection } from '../types/n8n-api';
 import { Logger } from '../utils/logger';
@@ -54,6 +55,8 @@ export class WorkflowDiffEngine {
   // Track tag operations for dedicated API calls
   private tagsToAdd: string[] = [];
   private tagsToRemove: string[] = [];
+  // Track transfer operation for dedicated API call
+  private transferToProjectId: string | undefined;
 
   /**
    * Apply diff operations to a workflow
@@ -70,6 +73,7 @@ export class WorkflowDiffEngine {
       this.removedNodeNames.clear();
       this.tagsToAdd = [];
       this.tagsToRemove = [];
+      this.transferToProjectId = undefined;
 
       // Clone workflow to avoid modifying original
       const workflowCopy = JSON.parse(JSON.stringify(workflow));
@@ -141,6 +145,12 @@ export class WorkflowDiffEngine {
           };
         }
 
+        // Extract and clean up activation flags (same as atomic mode)
+        const shouldActivate = (workflowCopy as any)._shouldActivate === true;
+        const shouldDeactivate = (workflowCopy as any)._shouldDeactivate === true;
+        delete (workflowCopy as any)._shouldActivate;
+        delete (workflowCopy as any)._shouldDeactivate;
+
         const success = appliedIndices.length > 0;
         return {
           success,
@@ -151,8 +161,11 @@ export class WorkflowDiffEngine {
           warnings: this.warnings.length > 0 ? this.warnings : undefined,
           applied: appliedIndices,
           failed: failedIndices,
+          shouldActivate: shouldActivate || undefined,
+          shouldDeactivate: shouldDeactivate || undefined,
           tagsToAdd: this.tagsToAdd.length > 0 ? this.tagsToAdd : undefined,
-          tagsToRemove: this.tagsToRemove.length > 0 ? this.tagsToRemove : undefined
+          tagsToRemove: this.tagsToRemove.length > 0 ? this.tagsToRemove : undefined,
+          transferToProjectId: this.transferToProjectId || undefined
         };
       } else {
         // Atomic mode: all operations must succeed
@@ -256,7 +269,8 @@ export class WorkflowDiffEngine {
           shouldActivate: shouldActivate || undefined,
           shouldDeactivate: shouldDeactivate || undefined,
           tagsToAdd: this.tagsToAdd.length > 0 ? this.tagsToAdd : undefined,
-          tagsToRemove: this.tagsToRemove.length > 0 ? this.tagsToRemove : undefined
+          tagsToRemove: this.tagsToRemove.length > 0 ? this.tagsToRemove : undefined,
+          transferToProjectId: this.transferToProjectId || undefined
         };
       }
     } catch (error) {
@@ -298,6 +312,8 @@ export class WorkflowDiffEngine {
       case 'addTag':
       case 'removeTag':
         return null; // These are always valid
+      case 'transferWorkflow':
+        return this.validateTransferWorkflow(workflow, operation as TransferWorkflowOperation);
       case 'activateWorkflow':
         return this.validateActivateWorkflow(workflow, operation);
       case 'deactivateWorkflow':
@@ -366,6 +382,9 @@ export class WorkflowDiffEngine {
         break;
       case 'replaceConnections':
         this.applyReplaceConnections(workflow, operation);
+        break;
+      case 'transferWorkflow':
+        this.applyTransferWorkflow(workflow, operation as TransferWorkflowOperation);
         break;
     }
   }
@@ -447,6 +466,31 @@ export class WorkflowDiffEngine {
         );
         if (collision) {
           return `Cannot rename node "${node.name}" to "${operation.updates.name}": A node with that name already exists (id: ${collision.id.substring(0, 8)}...). Please choose a different name.`;
+        }
+      }
+    }
+
+    // Validate __patch_find_replace syntax (#642)
+    for (const [path, value] of Object.entries(operation.updates)) {
+      if (value !== null && typeof value === 'object' && !Array.isArray(value)
+          && '__patch_find_replace' in value) {
+        const patches = value.__patch_find_replace;
+        if (!Array.isArray(patches)) {
+          return `Invalid __patch_find_replace at "${path}": must be an array of {find, replace} objects`;
+        }
+        for (let i = 0; i < patches.length; i++) {
+          const patch = patches[i];
+          if (!patch || typeof patch.find !== 'string' || typeof patch.replace !== 'string') {
+            return `Invalid __patch_find_replace entry at "${path}[${i}]": each entry must have "find" (string) and "replace" (string)`;
+          }
+        }
+        // node was already found above — reuse it
+        const currentValue = this.getNestedProperty(node, path);
+        if (currentValue === undefined) {
+          return `Cannot apply __patch_find_replace to "${path}": property does not exist on node`;
+        }
+        if (typeof currentValue !== 'string') {
+          return `Cannot apply __patch_find_replace to "${path}": current value is ${typeof currentValue}, expected string`;
         }
       }
     }
@@ -702,7 +746,26 @@ export class WorkflowDiffEngine {
 
     // Apply updates using dot notation
     Object.entries(operation.updates).forEach(([path, value]) => {
-      this.setNestedProperty(node, path, value);
+      // Handle __patch_find_replace for surgical string edits (#642)
+      // Format and type validation already passed in validateUpdateNode()
+      if (value !== null && typeof value === 'object' && !Array.isArray(value)
+          && '__patch_find_replace' in value) {
+        const patches = value.__patch_find_replace as Array<{ find: string; replace: string }>;
+        let current = this.getNestedProperty(node, path) as string;
+        for (const patch of patches) {
+          if (!current.includes(patch.find)) {
+            this.warnings.push({
+              operation: -1,
+              message: `__patch_find_replace: "${patch.find.substring(0, 50)}" not found in "${path}". Skipped.`
+            });
+            continue;
+          }
+          current = current.replace(patch.find, patch.replace);
+        }
+        this.setNestedProperty(node, path, current);
+      } else {
+        this.setNestedProperty(node, path, value);
+      }
     });
 
     // Sanitize node after updates to ensure metadata is complete
@@ -747,11 +810,13 @@ export class WorkflowDiffEngine {
     let sourceOutput = String(operation.sourceOutput ?? 'main');
     let sourceIndex = operation.sourceIndex ?? 0;
 
-    // Remap numeric sourceOutput (e.g., "0", "1") to "main" with sourceIndex (#537)
+    // Remap numeric sourceOutput (e.g., "0", "1") to "main" with sourceIndex (#537, #659)
     // Skip when smart parameters (branch, case) are present — they take precedence
-    if (/^\d+$/.test(sourceOutput) && operation.sourceIndex === undefined
+    const numericOutput = /^\d+$/.test(sourceOutput) ? parseInt(sourceOutput, 10) : null;
+    if (numericOutput !== null
+        && (operation.sourceIndex === undefined || operation.sourceIndex === numericOutput)
         && operation.branch === undefined && operation.case === undefined) {
-      sourceIndex = parseInt(sourceOutput, 10);
+      sourceIndex = numericOutput;
       sourceOutput = 'main';
     }
 
@@ -804,7 +869,11 @@ export class WorkflowDiffEngine {
     // Use nullish coalescing to properly handle explicit 0 values
     // Default targetInput to sourceOutput to preserve connection type for AI connections (ai_tool, ai_memory, etc.)
     // Coerce to string to handle numeric values passed as sourceOutput/targetInput
-    const targetInput = String(operation.targetInput ?? sourceOutput);
+    let targetInput = String(operation.targetInput ?? sourceOutput);
+    // Remap numeric targetInput (e.g., "0") to "main" — connection types are named strings (#659)
+    if (/^\d+$/.test(targetInput)) {
+      targetInput = 'main';
+    }
     const targetIndex = operation.targetIndex ?? 0;
 
     // Initialize source node connections object
@@ -975,6 +1044,18 @@ export class WorkflowDiffEngine {
     (workflow as any)._shouldDeactivate = true;
   }
 
+  // Transfer operation — uses dedicated API call (PUT /workflows/{id}/transfer)
+  private validateTransferWorkflow(_workflow: Workflow, operation: TransferWorkflowOperation): string | null {
+    if (!operation.destinationProjectId) {
+      return 'transferWorkflow requires a non-empty destinationProjectId string';
+    }
+    return null;
+  }
+
+  private applyTransferWorkflow(_workflow: Workflow, operation: TransferWorkflowOperation): void {
+    this.transferToProjectId = operation.destinationProjectId;
+  }
+
   // Connection cleanup operation validators
   private validateCleanStaleConnections(workflow: Workflow, operation: CleanStaleConnectionsOperation): string | null {
     // This operation is always valid - it just cleans up what it finds
@@ -1128,9 +1209,10 @@ export class WorkflowDiffEngine {
             const connection = connectionsAtIndex[connIndex];
             // Check if target node was renamed
             if (renames.has(connection.node)) {
+              const oldTargetName = connection.node;
               const newTargetName = renames.get(connection.node)!;
               connection.node = newTargetName;
-              logger.debug(`Updated connection: ${sourceName}[${outputType}][${outputIndex}][${connIndex}].node: "${connection.node}" → "${newTargetName}"`);
+              logger.debug(`Updated connection: ${sourceName}[${outputType}][${outputIndex}][${connIndex}].node: "${oldTargetName}" → "${newTargetName}"`);
             }
           }
         }
@@ -1232,6 +1314,16 @@ export class WorkflowDiffEngine {
       .map(n => `"${n.name}" (id: ${n.id.substring(0, 8)}...)`)
       .join(', ');
     return `Node not found for ${operationType}: "${nodeIdentifier}". Available nodes: ${availableNodes}. Tip: Use node ID for names with special characters (apostrophes, quotes).`;
+  }
+
+  private getNestedProperty(obj: any, path: string): any {
+    const keys = path.split('.');
+    let current = obj;
+    for (const key of keys) {
+      if (current == null || typeof current !== 'object') return undefined;
+      current = current[key];
+    }
+    return current;
   }
 
   private setNestedProperty(obj: any, path: string, value: any): void {
