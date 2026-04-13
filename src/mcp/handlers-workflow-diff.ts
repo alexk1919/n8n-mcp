@@ -4,6 +4,7 @@
  */
 
 import { z } from 'zod';
+import { randomUUID } from 'crypto';
 import { McpToolResponse } from '../types/n8n-api';
 import { WorkflowDiffRequest, WorkflowDiffOperation, WorkflowDiffValidationError } from '../types/workflow-diff';
 import { WorkflowDiffEngine } from '../services/workflow-diff-engine';
@@ -33,7 +34,7 @@ function getValidator(repository: NodeRepository): WorkflowValidator {
 
 // Operation types that identify nodes by nodeId/nodeName
 const NODE_TARGETING_OPERATIONS = new Set([
-  'updateNode', 'removeNode', 'moveNode', 'enableNode', 'disableNode'
+  'updateNode', 'removeNode', 'moveNode', 'enableNode', 'disableNode', 'patchNodeField'
 ]);
 
 // Zod schema for the diff request
@@ -47,6 +48,8 @@ const workflowDiffSchema = z.object({
     nodeId: z.string().optional(),
     nodeName: z.string().optional(),
     updates: z.any().optional(),
+    fieldPath: z.string().optional(),
+    patches: z.any().optional(),
     position: z.tuple([z.number(), z.number()]).optional(),
     // Connection operations
     source: z.string().optional(),
@@ -100,7 +103,10 @@ export async function handleUpdatePartialWorkflow(
   context?: InstanceContext
 ): Promise<McpToolResponse> {
   const startTime = Date.now();
-  const sessionId = `mutation_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+  // Correlation ID for telemetry. Use a CSPRNG (crypto.randomUUID) rather
+  // than Math.random so two concurrent mutations can't collide on a
+  // predictable suffix — addresses CodeQL js/insecure-randomness.
+  const sessionId = `mutation_${Date.now()}_${randomUUID()}`;
   let workflowBefore: any = null;
   let validationBefore: any = null;
   let validationAfter: any = null;
@@ -569,6 +575,8 @@ function inferIntentFromOperations(operations: any[]): string {
         return `Remove node ${op.nodeName || op.nodeId || ''}`.trim();
       case 'updateNode':
         return `Update node ${op.nodeName || op.nodeId || ''}`.trim();
+      case 'patchNodeField':
+        return `Patch field on node ${op.nodeName || op.nodeId || ''}`.trim();
       case 'addConnection':
         return `Connect ${op.source || 'node'} to ${op.target || 'node'}`;
       case 'removeConnection':
@@ -603,6 +611,10 @@ function inferIntentFromOperations(operations: any[]): string {
   if (typeSet.has('updateNode')) {
     const count = opTypes.filter((t) => t === 'updateNode').length;
     summary.push(`update ${count} node${count > 1 ? 's' : ''}`);
+  }
+  if (typeSet.has('patchNodeField')) {
+    const count = opTypes.filter((t) => t === 'patchNodeField').length;
+    summary.push(`patch ${count} field${count > 1 ? 's' : ''}`);
   }
   if (typeSet.has('addConnection') || typeSet.has('rewireConnection')) {
     summary.push('modify connections');

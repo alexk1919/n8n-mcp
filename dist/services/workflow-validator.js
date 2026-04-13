@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.WorkflowValidator = exports.VALID_CONNECTION_TYPES = void 0;
 const crypto_1 = __importDefault(require("crypto"));
 const expression_validator_1 = require("./expression-validator");
+const expression_utils_1 = require("../utils/expression-utils");
 const expression_format_validator_1 = require("./expression-format-validator");
 const node_similarity_service_1 = require("./node-similarity-service");
 const node_type_normalizer_1 = require("../utils/node-type-normalizer");
@@ -14,6 +15,7 @@ const ai_node_validator_1 = require("./ai-node-validator");
 const ai_tool_validators_1 = require("./ai-tool-validators");
 const node_type_utils_1 = require("../utils/node-type-utils");
 const node_classification_1 = require("../utils/node-classification");
+const n8n_validation_1 = require("./n8n-validation");
 const tool_variant_generator_1 = require("./tool-variant-generator");
 const logger = new logger_1.Logger({ prefix: '[WorkflowValidator]' });
 exports.VALID_CONNECTION_TYPES = new Set([
@@ -367,6 +369,17 @@ class WorkflowValidator {
                         message: typeof warning === 'string' ? warning : warning.message || String(warning)
                     });
                 });
+                if (node.type === 'n8n-nodes-base.if' || node.type === 'n8n-nodes-base.switch') {
+                    const conditionErrors = (0, n8n_validation_1.validateConditionNodeStructure)(node);
+                    for (const err of conditionErrors) {
+                        result.errors.push({
+                            type: 'error',
+                            nodeId: node.id,
+                            nodeName: node.name,
+                            message: err
+                        });
+                    }
+                }
             }
             catch (error) {
                 result.errors.push({
@@ -1019,10 +1032,7 @@ class WorkflowValidator {
     countExpressionsInObject(obj) {
         let count = 0;
         if (typeof obj === 'string') {
-            const matches = obj.match(/\{\{[\s\S]+?\}\}/g);
-            if (matches) {
-                count += matches.length;
-            }
+            count += (0, expression_utils_1.extractBracketExpressions)(obj).length;
         }
         else if (Array.isArray(obj)) {
             for (const item of obj) {

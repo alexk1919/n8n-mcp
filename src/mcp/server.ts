@@ -7,7 +7,7 @@ import {
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { existsSync, promises as fs } from 'fs';
+import { existsSync, readFileSync, promises as fs } from 'fs';
 import path from 'path';
 import { n8nDocumentationToolsFinal } from './tools';
 import { UIAppRegistry } from './ui';
@@ -41,9 +41,23 @@ import {
   STANDARD_PROTOCOL_VERSION
 } from '../utils/protocol-version';
 import { InstanceContext } from '../types/instance-context';
+import { GenerateWorkflowHandler, GenerateWorkflowHelpers } from '../types/generate-workflow';
 import { telemetry } from '../telemetry';
 import { EarlyErrorLogger } from '../telemetry/early-error-logger';
 import { STARTUP_CHECKPOINTS } from '../telemetry/startup-checkpoints';
+
+/**
+ * Escape a string for safe use as a literal inside `new RegExp(...)`.
+ *
+ * Addresses CodeQL js/regex-injection: search queries are user-controlled,
+ * and passing them directly into `new RegExp` lets a crafted query either
+ * alter matching semantics (e.g. `.*`) or trigger polynomial/exponential
+ * backtracking. We only ever want literal substring matching with word
+ * boundaries, so escaping all regex metacharacters is the right fix.
+ */
+function escapeRegExp(input: string): string {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 interface NodeRow {
   node_type: string;
@@ -141,6 +155,10 @@ interface VersionComparisonInfo {
 
 type NodeInfoResponse = NodeMinimalInfo | NodeStandardInfo | NodeFullInfo | VersionHistoryInfo | VersionComparisonInfo;
 
+interface MCPServerOptions {
+  generateWorkflowHandler?: GenerateWorkflowHandler;
+}
+
 export class N8NDocumentationMCPServer {
   private server: Server;
   private db: DatabaseAdapter | null = null;
@@ -157,10 +175,12 @@ export class N8NDocumentationMCPServer {
   private useSharedDatabase: boolean = false;  // Track if using shared DB for cleanup
   private sharedDbState: SharedDatabaseState | null = null;  // Reference to shared DB state for release
   private isShutdown: boolean = false;  // Prevent double-shutdown
+  private generateWorkflowHandler?: GenerateWorkflowHandler;
 
-  constructor(instanceContext?: InstanceContext, earlyLogger?: EarlyErrorLogger) {
+  constructor(instanceContext?: InstanceContext, earlyLogger?: EarlyErrorLogger, options?: MCPServerOptions) {
     this.instanceContext = instanceContext;
     this.earlyLogger = earlyLogger || null;
+    this.generateWorkflowHandler = options?.generateWorkflowHandler;
     // Check for test environment first
     const envDbPath = process.env.NODE_DB_PATH;
     let dbPath: string | null = null;
@@ -1041,6 +1061,15 @@ export class N8NDocumentationMCPServer {
           ? { valid: true, errors: [] }
           : { valid: false, errors: [{ field: 'action', message: 'action is required' }] };
         break;
+      case 'n8n_manage_credentials':
+        validationResult = args.action
+          ? { valid: true, errors: [] }
+          : { valid: false, errors: [{ field: 'action', message: 'action is required' }] };
+        break;
+      case 'n8n_audit_instance':
+        // No required parameters - all are optional
+        validationResult = { valid: true, errors: [] };
+        break;
       case 'n8n_deploy_template':
         // Requires templateId parameter
         validationResult = args.templateId !== undefined
@@ -1310,6 +1339,7 @@ export class N8NDocumentationMCPServer {
         return this.searchNodes(args.query, limit, {
           mode: args.mode,
           includeExamples: args.includeExamples,
+          includeOperations: args.includeOperations,
           source: args.source
         });
       case 'get_node':
@@ -1414,6 +1444,8 @@ export class N8NDocumentationMCPServer {
               requiredService: args.requiredService,
               targetAudience: args.targetAudience
             }, searchLimit, searchOffset);
+          case 'patterns':
+            return this.getWorkflowPatterns(args.task as string | undefined, searchLimit);
           case 'keyword':
           default:
             if (!args.query) {
@@ -1526,6 +1558,72 @@ export class N8NDocumentationMCPServer {
           default:
             throw new Error(`Unknown action: ${dtAction}. Valid actions: createTable, listTables, getTable, updateTable, deleteTable, getRows, insertRows, updateRows, upsertRows, deleteRows`);
         }
+      }
+
+      case 'n8n_manage_credentials': {
+        this.validateToolParams(name, args, ['action']);
+        const credAction = args.action;
+        switch (credAction) {
+          case 'list':      return n8nHandlers.handleListCredentials(args, this.instanceContext);
+          case 'get':       return n8nHandlers.handleGetCredential(args, this.instanceContext);
+          case 'create':    return n8nHandlers.handleCreateCredential(args, this.instanceContext);
+          case 'update':    return n8nHandlers.handleUpdateCredential(args, this.instanceContext);
+          case 'delete':    return n8nHandlers.handleDeleteCredential(args, this.instanceContext);
+          case 'getSchema': return n8nHandlers.handleGetCredentialSchema(args, this.instanceContext);
+          default:
+            throw new Error(`Unknown action: ${credAction}. Valid actions: list, get, create, update, delete, getSchema`);
+        }
+      }
+
+      case 'n8n_audit_instance':
+        // No required parameters - all are optional
+        return n8nHandlers.handleAuditInstance(args, this.instanceContext);
+
+      case 'n8n_generate_workflow': {
+        this.validateToolParams(name, args, ['description']);
+
+        if (this.generateWorkflowHandler && this.instanceContext) {
+          await this.ensureInitialized();
+          if (!this.repository) {
+            throw new Error('Repository not initialized');
+          }
+
+          const repo = this.repository;
+          const ctx = this.instanceContext;
+          const helpers: GenerateWorkflowHelpers = {
+            createWorkflow: (wfArgs) =>
+              n8nHandlers.handleCreateWorkflow(wfArgs, ctx),
+            validateWorkflow: (id) =>
+              n8nHandlers.handleValidateWorkflow({ id }, repo, ctx),
+            autofixWorkflow: (id) =>
+              n8nHandlers.handleAutofixWorkflow({ id }, repo, ctx),
+            getWorkflow: (id) =>
+              n8nHandlers.handleGetWorkflow({ id }, ctx),
+          };
+
+          try {
+            const result = await this.generateWorkflowHandler(args, ctx, helpers);
+            return result ?? { success: false, error: 'Handler returned no result' };
+          } catch (err: any) {
+            const message = err instanceof Error ? err.message : String(err);
+            return { success: false, error: message };
+          }
+        }
+
+        // No handler and/or no instanceContext — self-hosted deployment
+        return {
+          hosted_only: true,
+          message: 'The n8n_generate_workflow tool is available exclusively on the hosted version of n8n-mcp. ' +
+            'It uses AI to generate complete, validated n8n workflows from natural language descriptions.\n\n' +
+            'To access this feature:\n' +
+            '1. Register for free at https://dashboard.n8n-mcp.com\n' +
+            '2. Connect your n8n instance\n' +
+            '3. Use your hosted API key in your MCP client\n\n' +
+            'The hosted service includes:\n' +
+            '- 73,000+ pre-built workflow templates with instant deployment\n' +
+            '- AI-powered fresh generation for custom workflows\n' +
+            '- Automatic validation and error correction'
+        };
       }
 
       default:
@@ -1681,6 +1779,7 @@ export class N8NDocumentationMCPServer {
       mode?: 'OR' | 'AND' | 'FUZZY';
       includeSource?: boolean;
       includeExamples?: boolean;
+      includeOperations?: boolean;
       source?: 'all' | 'core' | 'community' | 'verified';
     }
   ): Promise<any> {
@@ -1723,6 +1822,7 @@ export class N8NDocumentationMCPServer {
     options?: {
       includeSource?: boolean;
       includeExamples?: boolean;
+      includeOperations?: boolean;
       source?: 'all' | 'core' | 'community' | 'verified';
     }
   ): Promise<any> {
@@ -1736,7 +1836,7 @@ export class N8NDocumentationMCPServer {
     
     // For FUZZY mode, use LIKE search with typo patterns
     if (mode === 'FUZZY') {
-      return this.searchNodesFuzzy(cleanedQuery, limit);
+      return this.searchNodesFuzzy(cleanedQuery, limit, { includeOperations: options?.includeOperations });
     }
     
     let ftsQuery: string;
@@ -1827,7 +1927,7 @@ export class N8NDocumentationMCPServer {
       if (cleanedQuery.toLowerCase().includes('http') && !hasHttpRequest) {
         // FTS missed HTTP Request, fall back to LIKE search
         logger.debug('FTS missed HTTP Request node, augmenting with LIKE search');
-        return this.searchNodesLIKE(query, limit);
+        return this.searchNodesLIKE(query, limit, options);
       }
       
       const result: any = {
@@ -1852,6 +1952,14 @@ export class N8NDocumentationMCPServer {
             }
             if ((node as any).npm_downloads) {
               nodeResult.npmDownloads = (node as any).npm_downloads;
+            }
+          }
+
+          // Add operations tree if requested
+          if (options?.includeOperations) {
+            const opsTree = this.buildOperationsTree(node.operations);
+            if (opsTree) {
+              nodeResult.operationsTree = opsTree;
             }
           }
 
@@ -1922,7 +2030,13 @@ export class N8NDocumentationMCPServer {
     }
   }
   
-  private async searchNodesFuzzy(query: string, limit: number): Promise<any> {
+  private async searchNodesFuzzy(
+    query: string,
+    limit: number,
+    options?: {
+      includeOperations?: boolean;
+    }
+  ): Promise<any> {
     if (!this.db) throw new Error('Database not initialized');
     
     // Split into words for fuzzy matching
@@ -1963,14 +2077,26 @@ export class N8NDocumentationMCPServer {
     return {
       query,
       mode: 'FUZZY',
-      results: matchingNodes.map(node => ({
-        nodeType: node.node_type,
-        workflowNodeType: getWorkflowNodeType(node.package_name, node.node_type),
-        displayName: node.display_name,
-        description: node.description,
-        category: node.category,
-        package: node.package_name
-      })),
+      results: matchingNodes.map(node => {
+        const nodeResult: any = {
+          nodeType: node.node_type,
+          workflowNodeType: getWorkflowNodeType(node.package_name, node.node_type),
+          displayName: node.display_name,
+          description: node.description,
+          category: node.category,
+          package: node.package_name
+        };
+
+        // Add operations tree if requested
+        if (options?.includeOperations) {
+          const opsTree = this.buildOperationsTree(node.operations);
+          if (opsTree) {
+            nodeResult.operationsTree = opsTree;
+          }
+        }
+
+        return nodeResult;
+      }),
       totalCount: matchingNodes.length
     };
   }
@@ -2075,6 +2201,7 @@ export class N8NDocumentationMCPServer {
     options?: {
       includeSource?: boolean;
       includeExamples?: boolean;
+      includeOperations?: boolean;
       source?: 'all' | 'core' | 'community' | 'verified';
     }
   ): Promise<any> {
@@ -2131,6 +2258,14 @@ export class N8NDocumentationMCPServer {
             }
             if ((node as any).npm_downloads) {
               nodeResult.npmDownloads = (node as any).npm_downloads;
+            }
+          }
+
+          // Add operations tree if requested
+          if (options?.includeOperations) {
+            const opsTree = this.buildOperationsTree(node.operations);
+            if (opsTree) {
+              nodeResult.operationsTree = opsTree;
             }
           }
 
@@ -2220,6 +2355,14 @@ export class N8NDocumentationMCPServer {
           }
         }
 
+        // Add operations tree if requested
+        if (options?.includeOperations) {
+          const opsTree = this.buildOperationsTree(node.operations);
+          if (opsTree) {
+            nodeResult.operationsTree = opsTree;
+          }
+        }
+
         return nodeResult;
       }),
       totalCount: rankedNodes.length
@@ -2303,7 +2446,7 @@ export class N8NDocumentationMCPServer {
       score = 800;
     }
     // Word boundary match in display name
-    else if (new RegExp(`\\b${query_lower}\\b`, 'i').test(node.display_name)) {
+    else if (new RegExp(`\\b${escapeRegExp(query_lower)}\\b`, 'i').test(node.display_name)) {
       score = 700;
     }
     // Contains in display name
@@ -2361,7 +2504,7 @@ export class N8NDocumentationMCPServer {
         score = 800;
       }
       // Word boundary match in display name
-      else if (new RegExp(`\\b${query_lower}\\b`, 'i').test(node.display_name)) {
+      else if (new RegExp(`\\b${escapeRegExp(query_lower)}\\b`, 'i').test(node.display_name)) {
         score = 700;
       }
       // Contains in display name
@@ -2588,6 +2731,51 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         nodeCount: pkg.count,
       })),
     };
+  }
+
+  /**
+   * Parse raw operations data and group by resource into a compact tree.
+   * Returns undefined when there are no operations (e.g. trigger nodes, Code node).
+   */
+  private buildOperationsTree(operationsRaw: string | any[] | null | undefined): Array<{resource: string, operations: string[]}> | undefined {
+    if (!operationsRaw) return undefined;
+
+    let ops: any[];
+    if (typeof operationsRaw === 'string') {
+      try {
+        ops = JSON.parse(operationsRaw);
+      } catch {
+        return undefined;
+      }
+    } else if (Array.isArray(operationsRaw)) {
+      ops = operationsRaw;
+    } else {
+      return undefined;
+    }
+
+    if (!Array.isArray(ops) || ops.length === 0) return undefined;
+
+    // Group by resource
+    const byResource = new Map<string, string[]>();
+    for (const op of ops) {
+      const resource = op.resource || 'default';
+      const opName = op.name || op.operation;
+      if (!opName) continue;
+      if (!byResource.has(resource)) {
+        byResource.set(resource, []);
+      }
+      const list = byResource.get(resource)!;
+      if (!list.includes(opName)) {
+        list.push(opName);
+      }
+    }
+
+    if (byResource.size === 0) return undefined;
+
+    return Array.from(byResource.entries()).map(([resource, operations]) => ({
+      resource,
+      operations
+    }));
   }
 
   private async getNodeEssentials(nodeType: string, includeExamples?: boolean): Promise<any> {
@@ -3787,6 +3975,71 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
     };
   }
   
+  private workflowPatternsCache: {
+    generatedAt: string;
+    templateCount: number;
+    categories: Record<string, {
+      templateCount: number;
+      pattern: string;
+      nodes?: Array<{ type: string; frequency: number; role: string; displayName: string }>;
+      commonChains?: Array<{ chain: string[]; count: number; frequency: number }>;
+    }>;
+  } | null = null;
+
+  private getWorkflowPatterns(category?: string, limit: number = 10): any {
+    // Load patterns file (cached after first load)
+    if (!this.workflowPatternsCache) {
+      try {
+        const patternsPath = path.join(__dirname, '..', '..', 'data', 'workflow-patterns.json');
+        if (existsSync(patternsPath)) {
+          this.workflowPatternsCache = JSON.parse(readFileSync(patternsPath, 'utf-8'));
+        } else {
+          return { error: 'Workflow patterns not generated yet. Run: npm run mine:patterns' };
+        }
+      } catch (e) {
+        return { error: `Failed to load workflow patterns: ${e instanceof Error ? e.message : String(e)}` };
+      }
+    }
+
+    const patterns = this.workflowPatternsCache!;
+
+    if (category) {
+      // Return specific category pattern data (trimmed for token efficiency)
+      const categoryData = patterns.categories[category];
+      if (!categoryData) {
+        const available = Object.keys(patterns.categories);
+        return { error: `Unknown category "${category}". Available: ${available.join(', ')}` };
+      }
+      const MAX_CHAINS = 5;
+      return {
+        category,
+        templateCount: categoryData.templateCount,
+        pattern: categoryData.pattern,
+        nodes: categoryData.nodes?.slice(0, limit).map(n => ({
+          type: n.type, freq: n.frequency, role: n.role
+        })),
+        chains: categoryData.commonChains?.slice(0, MAX_CHAINS).map(c => ({
+          path: c.chain.map(t => t.split('.').pop() ?? t), count: c.count, freq: c.frequency
+        })),
+      };
+    }
+
+    // Return overview of all categories
+    const overview = Object.entries(patterns.categories).map(([name, data]) => ({
+      category: name,
+      templateCount: data.templateCount,
+      pattern: data.pattern,
+      topNodes: data.nodes?.slice(0, 5).map(n => n.displayName || n.type),
+    }));
+
+    return {
+      templateCount: patterns.templateCount,
+      generatedAt: patterns.generatedAt,
+      categories: overview,
+      tip: 'Use search_templates({searchMode: "patterns", task: "category_name"}) for full pattern data with nodes, chains, and tips.',
+    };
+  }
+
   private async getTemplatesForTask(task: string, limit: number = 10, offset: number = 0): Promise<any> {
     await this.ensureInitialized();
     if (!this.templateService) throw new Error('Template service not initialized');

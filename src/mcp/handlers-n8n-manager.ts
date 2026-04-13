@@ -1,4 +1,7 @@
+import { randomUUID } from 'crypto';
 import { N8nApiClient } from '../services/n8n-api-client';
+import { scanWorkflows, type CustomCheckType } from '../services/workflow-security-scanner';
+import { buildAuditReport } from '../services/audit-report-builder';
 import { getN8nApiConfig, getN8nApiConfigFromContext } from '../config/n8n-api';
 import {
   Workflow,
@@ -760,7 +763,9 @@ export async function handleUpdateWorkflow(
   context?: InstanceContext
 ): Promise<McpToolResponse> {
   const startTime = Date.now();
-  const sessionId = `mutation_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+  // Correlation ID for telemetry. CSPRNG (randomUUID) rather than
+  // Math.random — addresses CodeQL js/insecure-randomness.
+  const sessionId = `mutation_${Date.now()}_${randomUUID()}`;
   let workflowBefore: any = null;
   let userIntent = 'Full workflow update';
 
@@ -775,6 +780,28 @@ export async function handleUpdateWorkflow(
       // Always fetch current workflow for validation (need all fields like name)
       const current = await client.getWorkflow(id);
       workflowBefore = JSON.parse(JSON.stringify(current));
+
+      // Preserve credentials from current workflow for nodes that don't specify them.
+      // AI-generated node updates typically omit credential references because they
+      // aren't included in the context provided to the AI. Without this merge, the
+      // n8n API rejects the PUT with missing credentials.
+      if (updateData.nodes && current.nodes) {
+        const currentById = new Map<string, any>();
+        const currentByName = new Map<string, any>();
+        for (const node of current.nodes) {
+          if (node.id) currentById.set(node.id, node);
+          currentByName.set(node.name, node);
+        }
+        for (const node of updateData.nodes as any[]) {
+          const hasCredentials = node.credentials && typeof node.credentials === 'object' && Object.keys(node.credentials).length > 0;
+          if (!hasCredentials) {
+            const match = (node.id && currentById.get(node.id)) || currentByName.get(node.name);
+            if (match?.credentials) {
+              node.credentials = match.credentials;
+            }
+          }
+        }
+      }
 
       // Create backup before modifying workflow (default: true)
       if (createBackup !== false) {
@@ -2767,7 +2794,8 @@ const deleteRowsSchema = tableIdSchema.extend({
   dryRun: z.boolean().optional(),
 });
 
-function handleDataTableError(error: unknown): McpToolResponse {
+/** Shared error handler for data table and credential operations. */
+function handleCrudError(error: unknown): McpToolResponse {
   if (error instanceof z.ZodError) {
     return { success: false, error: 'Invalid input', details: { errors: error.errors } };
   }
@@ -2796,7 +2824,7 @@ export async function handleCreateTable(args: unknown, context?: InstanceContext
       message: `Data table "${dataTable.name}" created with ID: ${dataTable.id}`,
     };
   } catch (error) {
-    return handleDataTableError(error);
+    return handleCrudError(error);
   }
 }
 
@@ -2814,7 +2842,7 @@ export async function handleListTables(args: unknown, context?: InstanceContext)
       },
     };
   } catch (error) {
-    return handleDataTableError(error);
+    return handleCrudError(error);
   }
 }
 
@@ -2825,7 +2853,7 @@ export async function handleGetTable(args: unknown, context?: InstanceContext): 
     const dataTable = await client.getDataTable(tableId);
     return { success: true, data: dataTable };
   } catch (error) {
-    return handleDataTableError(error);
+    return handleCrudError(error);
   }
 }
 
@@ -2843,7 +2871,7 @@ export async function handleUpdateTable(args: unknown, context?: InstanceContext
         (hasColumns ? '. Note: columns parameter was ignored — table schema is immutable after creation via the public API' : ''),
     };
   } catch (error) {
-    return handleDataTableError(error);
+    return handleCrudError(error);
   }
 }
 
@@ -2854,7 +2882,7 @@ export async function handleDeleteTable(args: unknown, context?: InstanceContext
     await client.deleteDataTable(tableId);
     return { success: true, message: `Data table ${tableId} deleted successfully` };
   } catch (error) {
-    return handleDataTableError(error);
+    return handleCrudError(error);
   }
 }
 
@@ -2879,7 +2907,7 @@ export async function handleGetRows(args: unknown, context?: InstanceContext): P
       },
     };
   } catch (error) {
-    return handleDataTableError(error);
+    return handleCrudError(error);
   }
 }
 
@@ -2894,7 +2922,7 @@ export async function handleInsertRows(args: unknown, context?: InstanceContext)
       message: `Rows inserted into data table ${tableId}`,
     };
   } catch (error) {
-    return handleDataTableError(error);
+    return handleCrudError(error);
   }
 }
 
@@ -2909,7 +2937,7 @@ export async function handleUpdateRows(args: unknown, context?: InstanceContext)
       message: params.dryRun ? 'Dry run: rows matched (no changes applied)' : 'Rows updated successfully',
     };
   } catch (error) {
-    return handleDataTableError(error);
+    return handleCrudError(error);
   }
 }
 
@@ -2924,7 +2952,7 @@ export async function handleUpsertRows(args: unknown, context?: InstanceContext)
       message: params.dryRun ? 'Dry run: upsert previewed (no changes applied)' : 'Row upserted successfully',
     };
   } catch (error) {
-    return handleDataTableError(error);
+    return handleCrudError(error);
   }
 }
 
@@ -2943,6 +2971,268 @@ export async function handleDeleteRows(args: unknown, context?: InstanceContext)
       message: params.dryRun ? 'Dry run: rows matched for deletion (no changes applied)' : 'Rows deleted successfully',
     };
   } catch (error) {
-    return handleDataTableError(error);
+    return handleCrudError(error);
+  }
+}
+
+// ========================================================================
+// Credential Management Handlers
+// ========================================================================
+
+// SECURITY: Never log credential data values (they contain secrets like API keys, passwords).
+// Only log credential name, type, and ID.
+
+const listCredentialsSchema = z.object({}).passthrough();
+
+const getCredentialSchema = z.object({
+  id: z.string({ required_error: 'Credential ID is required' }),
+});
+
+const createCredentialSchema = z.object({
+  name: z.string({ required_error: 'Credential name is required' }),
+  type: z.string({ required_error: 'Credential type is required' }),
+  data: z.record(z.any(), { required_error: 'Credential data is required' }),
+});
+
+const updateCredentialSchema = z.object({
+  id: z.string({ required_error: 'Credential ID is required' }),
+  name: z.string().optional(),
+  type: z.string().optional(),
+  data: z.record(z.any()).optional(),
+});
+
+const deleteCredentialSchema = z.object({
+  id: z.string({ required_error: 'Credential ID is required' }),
+});
+
+const getCredentialSchemaTypeSchema = z.object({
+  type: z.string({ required_error: 'Credential type is required' }),
+});
+
+export async function handleListCredentials(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const client = ensureApiConfigured(context);
+    listCredentialsSchema.parse(args);
+    const result = await client.listCredentials();
+    return {
+      success: true,
+      data: {
+        credentials: result.data,
+        count: result.data.length,
+        nextCursor: result.nextCursor || undefined,
+      },
+    };
+  } catch (error) {
+    return handleCrudError(error);
+  }
+}
+
+export async function handleGetCredential(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const client = ensureApiConfigured(context);
+    const { id } = getCredentialSchema.parse(args);
+    let credential;
+    try {
+      credential = await client.getCredential(id);
+    } catch (getError: unknown) {
+      // GET /credentials/:id is not in the n8n public API — fall back to list + filter
+      const status = (getError as { statusCode?: number }).statusCode;
+      const msg = (getError as Error).message ?? '';
+      const isUnsupported = status === 405 || status === 403 || msg.includes('not allowed');
+      if (!isUnsupported) {
+        throw getError;
+      }
+      const list = await client.listCredentials();
+      credential = list.data.find((c) => c.id === id);
+      if (!credential) {
+        return { success: false, error: `Credential ${id} not found` };
+      }
+    }
+    // Strip sensitive data field — defense in depth against future n8n versions returning decrypted values
+    const { data: _sensitiveData, ...safeCred } = credential;
+    return {
+      success: true,
+      data: safeCred,
+    };
+  } catch (error) {
+    return handleCrudError(error);
+  }
+}
+
+export async function handleCreateCredential(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const client = ensureApiConfigured(context);
+    const { name, type, data } = createCredentialSchema.parse(args);
+    logger.info(`Creating credential: name="${name}", type="${type}"`);
+    const credential = await client.createCredential({ name, type, data });
+    const { data: _sensitiveData, ...safeCred } = credential;
+    return {
+      success: true,
+      data: safeCred,
+      message: `Credential "${name}" (type: ${type}) created with ID ${credential.id}`,
+    };
+  } catch (error) {
+    return handleCrudError(error);
+  }
+}
+
+export async function handleUpdateCredential(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const client = ensureApiConfigured(context);
+    const { id, name, type, data } = updateCredentialSchema.parse(args);
+    logger.info(`Updating credential: id="${id}"${name ? `, name="${name}"` : ''}`);
+    const updatePayload: Record<string, any> = {};
+    if (name !== undefined) updatePayload.name = name;
+    if (type !== undefined) updatePayload.type = type;
+    if (data !== undefined) updatePayload.data = data;
+    const credential = await client.updateCredential(id, updatePayload);
+    const { data: _sensitiveData, ...safeCred } = credential;
+    return {
+      success: true,
+      data: safeCred,
+      message: `Credential ${id} updated successfully`,
+    };
+  } catch (error) {
+    return handleCrudError(error);
+  }
+}
+
+export async function handleDeleteCredential(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const client = ensureApiConfigured(context);
+    const { id } = deleteCredentialSchema.parse(args);
+    logger.info(`Deleting credential: id="${id}"`);
+    await client.deleteCredential(id);
+    return {
+      success: true,
+      message: `Credential ${id} deleted successfully`,
+    };
+  } catch (error) {
+    return handleCrudError(error);
+  }
+}
+
+export async function handleGetCredentialSchema(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const client = ensureApiConfigured(context);
+    const { type } = getCredentialSchemaTypeSchema.parse(args);
+    const schema = await client.getCredentialSchema(type);
+    return {
+      success: true,
+      data: schema,
+      message: `Schema for credential type "${type}"`,
+    };
+  } catch (error) {
+    return handleCrudError(error);
+  }
+}
+
+// ── Audit Instance ─────────────────────────────────────────────────────────
+
+const auditInstanceSchema = z.object({
+  categories: z.array(z.enum([
+    'credentials', 'database', 'nodes', 'instance', 'filesystem',
+  ])).optional(),
+  includeCustomScan: z.boolean().optional().default(true),
+  daysAbandonedWorkflow: z.number().optional(),
+  customChecks: z.array(z.enum([
+    'hardcoded_secrets', 'unauthenticated_webhooks', 'error_handling', 'data_retention',
+  ])).optional(),
+});
+
+export async function handleAuditInstance(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const client = ensureApiConfigured(context);
+    const input = auditInstanceSchema.parse(args);
+
+    const totalStart = Date.now();
+    const warnings: string[] = [];
+
+    // Phase A: n8n built-in audit
+    let builtinAudit: any = null;
+    let builtinAuditMs = 0;
+    try {
+      const auditStart = Date.now();
+      builtinAudit = await client.generateAudit({
+        categories: input.categories,
+        daysAbandonedWorkflow: input.daysAbandonedWorkflow,
+      });
+      builtinAuditMs = Date.now() - auditStart;
+    } catch (auditError: any) {
+      builtinAuditMs = Date.now() - totalStart;
+      const msg = auditError?.statusCode === 404
+        ? 'Built-in audit endpoint not available on this n8n version.'
+        : `Built-in audit failed: ${auditError?.message || 'unknown error'}`;
+      warnings.push(msg);
+      logger.warn(`Audit: ${msg}`);
+    }
+
+    // Phase B: Custom workflow scanning
+    let customReport = null;
+    let workflowFetchMs = 0;
+    let customScanMs = 0;
+
+    if (input.includeCustomScan) {
+      try {
+        const fetchStart = Date.now();
+        const allWorkflows = await client.listAllWorkflows();
+        workflowFetchMs = Date.now() - fetchStart;
+
+        logger.info(`Audit: fetched ${allWorkflows.length} workflows for scanning`);
+
+        const scanStart = Date.now();
+        customReport = scanWorkflows(
+          allWorkflows,
+          input.customChecks as CustomCheckType[] | undefined,
+        );
+        customScanMs = Date.now() - scanStart;
+
+        logger.info(`Audit: custom scan found ${customReport.summary.total} findings across ${customReport.workflowsScanned} workflows`);
+      } catch (scanError: any) {
+        warnings.push(`Custom scan failed: ${scanError?.message || 'unknown error'}`);
+        logger.warn(`Audit: custom scan failed: ${scanError?.message}`);
+      }
+    }
+
+    const totalMs = Date.now() - totalStart;
+
+    // Build the API URL for the report (mask the key)
+    const apiConfig = context?.n8nApiUrl
+      ? { baseUrl: context.n8nApiUrl }
+      : getN8nApiConfig();
+    const instanceUrl = apiConfig?.baseUrl || 'unknown';
+
+    // Build unified markdown report
+    const report = buildAuditReport({
+      builtinAudit,
+      customReport,
+      performance: { builtinAuditMs, workflowFetchMs, customScanMs, totalMs },
+      instanceUrl,
+      warnings: warnings.length > 0 ? warnings : undefined,
+    });
+
+    return {
+      success: true,
+      data: {
+        report: report.markdown,
+        summary: report.summary,
+      },
+    };
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return {
+        success: false,
+        error: 'Invalid audit parameters',
+        details: { issues: error.errors },
+      };
+    }
+    if (error instanceof N8nApiError) {
+      return {
+        success: false,
+        error: getUserFriendlyErrorMessage(error),
+      };
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    return { success: false, error: message };
   }
 }
