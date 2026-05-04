@@ -7,6 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.50.3] - 2026-05-04
+
+### Fixed
+
+- `n8n_update_partial_workflow` now rolls back the prior workflow snapshot when n8n persists a body before failing (e.g. unsupported `typeVersion` trips the activation step inside the same PUT), preventing silent corruption of active workflows. Reported and originally fixed by @pybe (#769, closes #770).
+- The rollback no longer fires (and no longer claims `(workflow restored to prior state)`) when n8n rejected the PUT before persisting. The handler now compares `versionId` / `versionCounter` / `updatedAt` from a fresh GET to detect whether persistence actually happened.
+- Rollback-failure responses include `details.priorVersionId` so callers can recover the right snapshot via `n8n_workflow_versions`.
+
+Conceived by Romuald Członkowski - https://www.aiadvisors.pl/en
+
+## [2.50.2] - 2026-05-04
+
+### Security
+
+- Fix SSRF in webhook URL validation (GHSA-cmrh-wvq6-wm9r). Reported by @fg0x0.
+
+### Notes
+
+- The n8n API client now validates `N8N_API_URL` through the same SSRF gate as user-supplied webhook URLs. Operators running n8n on the same host as n8n-mcp (`N8N_API_URL=http://localhost:5678` or an RFC1918 address) must set `WEBHOOK_SECURITY_MODE=moderate` (allows localhost, still blocks cloud metadata) to keep the API client functional after upgrade. Default `strict` is unchanged for production deployments with a public n8n URL.
+
+Conceived by Romuald Członkowski - https://www.aiadvisors.pl/en
+
+## [2.50.1] - 2026-05-04
+
+### Security
+
+- Fix path-segment validation gap in n8n API client (GHSA-8g7g-hmwm-6rv2). Reported by @cybercraftsolutionsllc.
+- Fix redirect-following on validated webhook, form, and chat trigger requests (GHSA-8g7g-hmwm-6rv2). Reported by @cybercraftsolutionsllc.
+- Redact mutation telemetry payloads before storage (GHSA-8g7g-hmwm-6rv2). Reported by @cybercraftsolutionsllc.
+
+Conceived by Romuald Członkowski - https://www.aiadvisors.pl/en
+
+## [2.50.0] - 2026-05-02
+
+### Added
+
+- **Local LLM support for template metadata generation.** `fetch:templates --metadata-only` now routes to any OpenAI-compatible server (vLLM, Ollama, llama.cpp's `/v1`) when `N8N_MCP_LLM_BASE_URL` is set, falling back to OpenAI's Batch API otherwise. New `SequentialMetadataProcessor` issues direct `chat.completions.create` calls with configurable concurrency, since vLLM and friends do not implement OpenAI's `/v1/batches` endpoint. New env vars: `N8N_MCP_LLM_BASE_URL`, `N8N_MCP_LLM_MODEL` (default `Qwen/Qwen3.5-9B`), `N8N_MCP_LLM_API_KEY` (defaults to `EMPTY` for keyless local servers), `N8N_MCP_LLM_CONCURRENCY` (default 40). The cloud Batch path is unchanged.
+- **Stronger, leak-resistant prompt** for template metadata. The system message now spells out what each schema field means (categories, use_cases, required_services, key_features, target_audience) and explicitly forbids echoing prompt headers, which fixes a class of failures where smaller open-source models occasionally emitted `Template: ...` strings into the `categories` array. `createBatchRequest()` now delegates to `buildChatRequest()`, so the cloud Batch path picks up the new prompt too — both paths share the same body verbatim.
+
+### Changed
+
+- **Template store refreshed from n8n.io.** The templates table was rebuilt against the current API: 2,352 templates, 156 ranked node configurations across the most-popular nodes. Previous rebuild dated 2025-12-24.
+- **Template metadata regenerated end-to-end** against a local Qwen3.5-9B vLLM instance: 2,351/2,352 templates carry fresh `metadata_json` (99.96% coverage). One template (4334) skipped due to a tokenizer encoding edge case in its source content.
+- **Community node store refreshed** from the n8n Strapi verified list and the top-100 npm packages: **830 community nodes** (was 768, +62 new). Existing READMEs and AI summaries preserved through the upsert. Total nodes in DB: 1,650 (820 base + 830 community).
+- **Community AI documentation summaries regenerated** against the same local Qwen3.5-9B instance: **825/830 nodes** with both `npm_readme` and `ai_documentation_summary` (99.4% coverage). The 5 misses are npm packages that publish no README on npmjs, so there is no source text to summarise.
+
+### Notes
+
+- Template fetch only drops the `templates` and `templates_fts` tables — never `nodes`. Community nodes were verified intact at 768 mid-run before the separate community refresh added the 62 new ones.
+- A backup of the pre-fetch database lives at `/tmp/nodes-pre-template-update-20260502-093230.db` on the maintainer's machine.
+
+Conceived by Romuald Członkowski - https://www.aiadvisors.pl/en
+
+## [2.49.0] - 2026-04-28
+
+### Changed
+
+- **Updated n8n to 2.18.4** (from 2.16.1). All four n8n packages bumped to the versions pinned by `n8n@stable`:
+  - `n8n-nodes-base`: 2.16.0 → 2.18.3
+  - `n8n-core`: 2.16.1 → 2.18.3
+  - `n8n-workflow`: 2.16.0 → 2.18.3
+  - `@n8n/n8n-nodes-langchain`: 2.16.1 → 2.18.3
+  - Pins are now exact (no caret) to prevent npm from auto-resolving to `2.19.0`, which `n8n@stable` does not yet endorse and which would also force a different `zod` peer.
+- **Bumped `zod` to 3.25.67** (from 3.24.1) to satisfy the new `zod` peer dependency declared by `n8n-core@2.18.3` and `n8n-workflow@2.18.3` — the same version `n8n@stable` itself depends on.
+- **Rebuilt node database**: 1,588 nodes total — 820 core (675 from `n8n-nodes-base` + 145 from `@n8n/n8n-nodes-langchain`) + 768 community (668 verified + 100 from npm). Community READMEs refreshed via `generate:docs:readme-only` (763/768 with READMEs, 581/768 with AI summaries — the AI-summary backfill for newly-added community nodes runs separately via the local LLM step).
+- **README badges and node counts updated** to reflect the new n8n version, node totals, and current passing-test count (`5,418`).
+
+Conceived by Romuald Członkowski - https://www.aiadvisors.pl/en
+
+## [2.48.3] - 2026-04-28
+
+### Fixed
+
+- **Validator warning for `__rl` resourceLocator fields missing `cachedResultName` (#715, originally reported in #516 by @upsurge911-lgtm).** When a `__rl` field has `mode` and `value` but no `cachedResultName`, the workflow runs but the n8n UI shows "Choose..." in dropdowns and dependent metadata fetches (column lists, base names, etc.) never fire — users see "No columns found" with no obvious cause. Pre-fix the validator was completely silent on this. New `missing-cached-result-name` warning fires at `runtime`/`ai-friendly`/`strict` profiles (suppressed at `minimal`). The warning is gated to modes where the n8n UI renders a dropdown that displays the cached label (`id`, `list`, `name`) — modes with raw inputs (`expression`, `url`) are skipped to avoid false positives. The autofix half (live n8n API resolution + placeholder fallback) ships in a separate follow-up PR.
+
+Conceived by Romuald Członkowski - https://www.aiadvisors.pl/en
+
+## [2.48.2] - 2026-04-28
+
+### Fixed
+
+- **`n8n_audit_instance` error message now distinguishes server-side from client-side failures (#736, reported by @waltho1123-cloud).** Pre-fix the warning was always `Built-in audit failed: <message>`, hiding HTTP status. The reporter's Zeabur deployment generates the `Invalid URL` string inside n8n's own audit code (likely from missing `N8N_PROTOCOL`/`N8N_HOST` env vars) and returned it as the response body — but the warning made it look like a client bug. Three new shapes: `endpoint not available` (404, unchanged); `Built-in audit failed (HTTP <status>): <reason>` for any other status; `Built-in audit failed (no response from n8n): <reason>` when no status was returned (timeouts, ECONNREFUSED). Also fixed a long-standing nit where the error path computed `builtinAuditMs` against `totalStart` instead of `auditStart`.
+- **`n8n_manage_credentials` accepts `oAuth2Api` + `clientCredentials` payloads (#740, reported by @bwsnwl).** n8n's upstream Ajv schema for `oAuth2Api` has a known bug: the `if/then/else` on `useDynamicClientRegistration` uses `properties.x.enum` to test value, which evaluates true vacuously when the field is absent — so both `then` branches fire simultaneously and there is no payload shape that satisfies the schema for a plain `clientCredentials` grant. New `applyCredentialDataShims` helper normalizes the payload for that specific combination: strips `useDynamicClientRegistration` when falsy, injects `sendAdditionalBodyProperties: false`, `additionalBodyProperties: ''`, and `serverUrl: ''` (only when the DCR branch fires spuriously — explicit `useDynamicClientRegistration: true` callers are left alone so n8n surfaces real missing-field errors). Applied symmetrically on both create and update paths. Will be removed once n8n fixes the schema upstream.
+
+Conceived by Romuald Członkowski - https://www.aiadvisors.pl/en
+
 ## [2.48.1] - 2026-04-28
 
 ### Fixed
